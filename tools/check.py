@@ -36,6 +36,9 @@ PORT_SHORT_RE = re.compile(r"^(\d{1,5})(/(tcp|udp))?$")
 COMPOSE_MAX = 64 * 1024
 USER_KINDS = ("default app user", "dedicated")
 MODES = ("read-write", "read-only")
+# What an entry can require (spec-app-catalog §3.10a). A box ignores a word it
+# doesn't know, so a mistyped one would quietly require nothing.
+REQUIRABLE = ("ports", "shares", "internet", "lan")
 
 
 class Findings:
@@ -253,6 +256,19 @@ def check_rest(f: Findings, e: dict) -> None:
                 f.fail(where, f"permissions.{k}: a list of strings")
         if perm.get("shares") is not None and not isinstance(perm["shares"], str):
             f.fail(where, "permissions.shares: a sentence")
+        required = perm.get("required", [])
+        if not isinstance(required, list) or not all(isinstance(x, str) for x in required):
+            f.fail(where, "permissions.required: a list of words")
+        else:
+            for word in required:
+                if word not in REQUIRABLE:
+                    f.fail(where, f"permissions.required: {word!r} is not one of {', '.join(REQUIRABLE)}")
+            if "internet" in required and perm.get("internet") is False:
+                f.fail(where, "permissions.required: internet, but internet = false")
+            if "lan" in required and perm.get("lan") is False:
+                f.fail(where, "permissions.required: lan, but lan = false")
+            if "ports" in required and not perm.get("ports"):
+                f.fail(where, "permissions.required: ports, but it lists none")
     limits = e.get("limits", {})
     if not isinstance(limits, dict):
         f.fail(where, "limits: a table")

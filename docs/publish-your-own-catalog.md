@@ -54,6 +54,7 @@ internet = true
 devices = ["/dev/dri"]                # optional
 host_network = false
 capabilities = []
+required = ["shares"]                 # no allow tick, and the wizard waits: ports, shares, internet, lan
 [[apps.data]]                         # named, permanent storage locations
 name = "config"
 bytes = 1073741824                    # a size hint
