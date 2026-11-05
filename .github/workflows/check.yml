@@ -1,0 +1,22 @@
+# Every push and pull request: the catalog parses by the box's rules and
+# its signature verifies with the key beside it (tools/check.py).
+name: check
+on:
+  push:
+  pull_request:
+jobs:
+  catalog:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: sigstore/cosign-installer@v3
+      - name: check every catalog file
+        run: |
+          set -eu
+          files=$(git ls-files '*.toml' | grep -v '^tools/' || true)
+          if [ -z "$files" ]; then echo "no catalog files"; exit 1; fi
+          # shellcheck disable=SC2086
+          python3 tools/check.py $files

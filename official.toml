@@ -1,0 +1,11 @@
+# The official LehrNAS app catalog: the apps LehrNAS publishes itself, each
+# pinned to the digests of one release. Signed: official.toml.sig is the
+# app-channel key's signature over this file's bytes (cosign sign-blob; the
+# public key is app-channel.pub beside it, and every LehrNAS box ships it).
+# Entries are written by each app's release command, never by hand.
+[channel]
+name = "LehrNAS official"
+# Where a box fetches it (online only); the signature and the key are
+# fetched from beside it.
+url = "https://raw.githubusercontent.com/Rightbracket/LehrNAS-apps/main/official.toml"
+key = "app-channel.pub"
