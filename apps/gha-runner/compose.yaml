@@ -1,0 +1,28 @@
+# The runner app's compose (docs/spec-runner-app.md §2 in LehrNAS). One image, both
+# services; the service with the token's key is the broker. `cache` is the only
+# disk a job writes (§5), and the workspace is in RAM (read_only: true). 60 s is a
+# job's time to end at a stop (§9.4). The release writes the tag and the entry's hash.
+services:
+  broker:
+    image: docker.io/eshork/gha-runner:RELEASE_TAG
+    read_only: true
+    restart: always
+    ports:
+      - "8711:8711/tcp"
+    environment:
+      GITHUB_TOKEN: ""
+      RUNNER_SCOPE: ""
+    volumes:
+      - config:/config
+      - cache:/cache
+  runner:
+    image: docker.io/eshork/gha-runner:RELEASE_TAG
+    read_only: true
+    restart: always
+    mem_limit: 3584m
+    stop_grace_period: 60s
+    volumes:
+      - cache:/cache
+volumes:
+  config:
+  cache:
