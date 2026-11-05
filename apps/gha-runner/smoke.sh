@@ -45,7 +45,7 @@ check '"marker":"one"' "$t/out1"
 [ ! -e "$t/shm/lehr-runner-jit" ] || { echo "FAIL: the config stayed in shm"; exit 1; }
 # Never on the command line.
 if ps -ax -o command | grep -F "$t" | grep -q jitconfig; then echo "FAIL: on a command line"; exit 1; fi
-[ "$(stat -f %Lp "$t/state/.credentials" 2>/dev/null || stat -c %a "$t/state/.credentials")" = 600 ] || { echo "FAIL: credentials' mode"; exit 1; }
+[ "$(stat -c %a "$t/state/.credentials" 2>/dev/null || stat -f %Lp "$t/state/.credentials")" = 600 ] || { echo "FAIL: credentials' mode"; exit 1; }
 
 # SIGTERM reaches the listener as SIGINT, and its status is the script's.
 kill -TERM "$pid"
