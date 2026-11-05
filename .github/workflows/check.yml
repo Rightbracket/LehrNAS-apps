@@ -16,7 +16,26 @@ jobs:
       - name: check every catalog file
         run: |
           set -eu
-          files=$(git ls-files '*.toml' | grep -v '^tools/' || true)
+          # Catalogs only: an app's folder holds its own template and manifests.
+          files=$(git ls-files '*.toml' | grep -v -E '^(tools|apps)/' || true)
           if [ -z "$files" ]; then echo "no catalog files"; exit 1; fi
           # shellcheck disable=SC2086
           python3 tools/check.py $files
+      - name: the entry templates, filled with placeholder digests
+        run: python3 tools/check_template.py apps/gha-runner/channel-entry.toml
+
+  gha-runner:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/gha-runner/broker
+    steps:
+      - uses: actions/checkout@v4
+      # rustup reads rust-toolchain.toml; clippy and rustfmt come with it.
+      - run: rustup component add clippy rustfmt
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+      - name: the runner's start script
+        working-directory: .
+        run: apps/gha-runner/smoke.sh

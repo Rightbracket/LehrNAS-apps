@@ -1,0 +1,72 @@
+# The GitHub runner's entry in the official channel (docs/spec-runner-app.md §2
+# in LehrNAS; the format is spec-app-catalog §3). `lehrdev runner release` fills
+# the version, the day, the tag and the digests, and writes the result into
+# official.toml; everything else is edited here, by hand.
+[[apps]]
+id = "gha-runner"
+name = "Runner for GitHub Actions"
+summary = "Runs your own repositories' GitHub Actions jobs on this box, one at a time."
+group = "Development"
+version = ""
+released = ""
+# One image, both services; the environment picks the role. Only `broker` has
+# the token's key. `cache` is the only disk a job writes (§5), and the workspace
+# is in RAM (read_only: true). 60 s is the job's time to end at a stop (§9.4).
+compose = """
+services:
+  broker:
+    image: docker.io/eshork/gha-runner:RELEASE_TAG
+    read_only: true
+    restart: always
+    ports:
+      - "8711:8711/tcp"
+    environment:
+      GITHUB_TOKEN: ""
+      RUNNER_SCOPE: ""
+    volumes:
+      - config:/config
+      - cache:/cache
+  runner:
+    image: docker.io/eshork/gha-runner:RELEASE_TAG
+    read_only: true
+    restart: always
+    mem_limit: 3584m
+    stop_grace_period: 60s
+    volumes:
+      - cache:/cache
+volumes:
+  config:
+  cache:
+"""
+# Both services pin one manifest list, in a public repository: the free tier's
+# one private slot is FileFerry's, and this image holds nothing private (§2).
+[[apps.images]]
+service = "broker"
+image = "docker.io/eshork/gha-runner"
+list = ""
+amd64 = ""
+arm64 = ""
+[[apps.images]]
+service = "runner"
+image = "docker.io/eshork/gha-runner"
+list = ""
+amd64 = ""
+arm64 = ""
+[apps.requirements]
+mem_mib = 4096
+cpus = 2
+[apps.permissions]
+ports = ["8711:8711/tcp"]
+shares = "none by default; a public repository refuses read-write"
+internet = true
+lan = false
+[apps.limits]
+cpu_weight = 20
+[[apps.data]]
+name = "config"
+bytes = 67108864
+[[apps.data]]
+name = "cache"
+bytes = 21474836480
+[apps.user]
+kind = "default app user"

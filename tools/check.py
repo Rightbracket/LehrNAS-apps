@@ -244,7 +244,7 @@ def check_rest(f: Findings, e: dict) -> None:
             if not port_ok(p, shorthand):
                 form = "HOST:CONTAINER[/tcp|udp]" if shorthand else "HOST:CONTAINER or <port>/tcp"
                 f.fail(where, f"permissions.ports: {p!r} is not {form}")
-        for k in ("internet", "host_network"):
+        for k in ("internet", "lan", "host_network"):
             if perm.get(k) is not None and not isinstance(perm[k], bool):
                 f.fail(where, f"permissions.{k}: true or false")
         for k in ("devices", "capabilities"):
@@ -253,6 +253,13 @@ def check_rest(f: Findings, e: dict) -> None:
                 f.fail(where, f"permissions.{k}: a list of strings")
         if perm.get("shares") is not None and not isinstance(perm["shares"], str):
             f.fail(where, "permissions.shares: a sentence")
+    limits = e.get("limits", {})
+    if not isinstance(limits, dict):
+        f.fail(where, "limits: a table")
+    elif limits.get("cpu_weight") is not None and (
+        not isinstance(limits["cpu_weight"], int) or not 1 <= limits["cpu_weight"] <= 100
+    ):
+        f.fail(where, "limits.cpu_weight: a whole number from 1 to 100")
     names: set[str] = set()
     for d in e.get("data", []):
         if not isinstance(d, dict) or not isinstance(d.get("name"), str) or not d["name"]:

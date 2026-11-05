@@ -1,8 +1,8 @@
 # LehrNAS apps
 
 The official LehrNAS app catalog: the apps LehrNAS publishes itself, each
-pinned to the digests of one release. Over time the apps' own code moves
-here too; today the repository holds the catalog.
+pinned to the digests of one release, and the code of the apps that have
+moved here.
 
 | File | What it is |
 |---|---|
@@ -10,6 +10,7 @@ here too; today the repository holds the catalog.
 | `official.toml.sig` | The app-channel key's signature over the file's bytes (`cosign sign-blob`). |
 | `app-channel.pub` | The key's public half. Every LehrNAS box ships the same bytes and verifies the catalog with them before reading a single entry. |
 | `tools/check.py` | Checks a catalog file by the box's rules; the CI runs it on every push. |
+| `apps/<app>/` | An app's own code, image and entry template. `apps/gha-runner/README.md` is the first. |
 
 ## How a box uses it
 

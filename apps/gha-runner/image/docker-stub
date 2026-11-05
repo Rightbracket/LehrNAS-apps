@@ -1,0 +1,5 @@
+#!/bin/sh
+# Containers inside a job are off in v1 (docs/spec-runner-app.md §6). The runner
+# calls `docker` for `container:` and `services:`, so this is what the job's log says.
+echo "This runner has no container support, so \`container:\` and \`services:\` can't run here." >&2
+exit 1
