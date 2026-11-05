@@ -5,7 +5,7 @@
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
 t=$(mktemp -d)
-trap 'kill "${pid:-0}" 2>/dev/null; rm -rf "$t"' EXIT
+trap 'kill "${pid:-0}" 2>/dev/null || true; rm -rf "$t"' EXIT
 # As tini starts it: a background command in a script would start with SIGINT
 # ignored and pass that on, which isn't what the service sees.
 set -m
