@@ -6,11 +6,13 @@ repositories, one job at a time, on a box that is usually idle. The design is
 
 | Path | What it is |
 |---|---|
-| `channel-entry.toml` | The catalog entry's template: two services, one image. The release fills it into `official.toml` |
+| `entry.toml` | The catalog entry, without its version and digests. The release fills it into `official.toml` |
+| `compose.yaml` | The app's two services, one image. The entry points at it |
 | `image/` | The image: Ubuntu, the actions/runner release tarball, tini, the broker |
-| `broker/` | The `broker` service, in Rust: holds the token, registers runners, serves the status page |
-| `smoke.sh` | The runner's start script against a fake listener; needs nothing |
-| `pod-check.sh` | Both services in real read-only containers with a fake GitHub; needs docker and the Ubuntu base |
+| `src/broker/` | The `broker` service, in Rust, a Cargo project of its own: holds the token, registers runners, serves the status page |
+| `tests/smoke.sh` | The runner's start script against a fake listener; needs nothing |
+| `tests/pod-check.sh` | Both services in real read-only containers with a fake GitHub; needs docker and the Ubuntu base |
+| `CHANGELOG.md` | What each release changed |
 
 ## How it works
 
@@ -58,19 +60,19 @@ turns public stops taking jobs.
 ## Build and test
 
 ```bash
-cd apps/gha-runner/broker && cargo test
+cd apps/gha-runner/src/broker && cargo test
 ```
 
 ```bash
-apps/gha-runner/smoke.sh
+apps/gha-runner/tests/smoke.sh
 ```
 
 ```bash
-python3 tools/check_template.py apps/gha-runner/channel-entry.toml
+apps/gha-runner/tests/pod-check.sh
 ```
 
 ```bash
-apps/gha-runner/pod-check.sh
+python3 tools/check_template.py
 ```
 
 A release is `lehrdev runner release gha-runner-YYYY.MMDD.N` in the LehrNAS

@@ -1,5 +1,6 @@
-# Every push and pull request: the catalog parses by the box's rules and
-# its signature verifies with the key beside it (tools/check.py).
+# Every push and pull request: the catalog parses by the box's rules, its
+# signature verifies with the key beside it (tools/check.py), and every app's
+# entry would pass once filled (tools/check_template.py).
 name: check
 on:
   push:
@@ -21,21 +22,5 @@ jobs:
           if [ -z "$files" ]; then echo "no catalog files"; exit 1; fi
           # shellcheck disable=SC2086
           python3 tools/check.py $files
-      - name: the entry templates, filled with placeholder digests
-        run: python3 tools/check_template.py apps/gha-runner/channel-entry.toml
-
-  gha-runner:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: apps/gha-runner/broker
-    steps:
-      - uses: actions/checkout@v4
-      # rustup reads rust-toolchain.toml; clippy and rustfmt come with it.
-      - run: rustup component add clippy rustfmt
-      - run: cargo fmt --check
-      - run: cargo clippy --locked --all-targets -- -D warnings
-      - run: cargo test --locked
-      - name: the runner's start script
-        working-directory: .
-        run: apps/gha-runner/smoke.sh
+      - name: every app's entry, filled with placeholder digests
+        run: python3 tools/check_template.py

@@ -5,12 +5,12 @@
 # (the image's own packages aren't installed). It proves the cycle: config handed
 # over with updates off, no token in the runner, a job's leftovers gone, the next
 # config only after the last runner is gone.
-#   apps/gha-runner/pod-check.sh [path to a linux gha-runner-broker]
+#   apps/gha-runner/tests/pod-check.sh [path to a linux gha-runner-broker]
 set -eu
-here=$(cd "$(dirname "$0")" && pwd)
+here=$(cd "$(dirname "$0")/.." && pwd)
 base=docker.io/library/ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852
 case $(uname -m) in arm64|aarch64) triple=aarch64-unknown-linux-musl ;; *) triple=x86_64-unknown-linux-musl ;; esac
-bin=${1:-$here/broker/target/$triple/release/gha-runner-broker}
+bin=${1:-$here/src/broker/target/$triple/release/gha-runner-broker}
 n=gha-pod-check-$$
 t=$(mktemp -d)
 cleanup() {

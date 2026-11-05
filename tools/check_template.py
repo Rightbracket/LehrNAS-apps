@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Check an app's entry template by the box's rules before a release fills it.
+"""Check every app's entry by the box's rules before a release fills it.
 
-    python3 tools/check_template.py apps/<app>/channel-entry.toml   (from the root)
+    python3 tools/check_template.py [apps/<id>/entry.toml ...]
 
-Fills the blanks the release command fills (the version, the day, the digests)
-with placeholders, then runs `check.py` over the result. Standard library only.
+Run from the repository's root. With no arguments, every `apps/*/entry.toml`.
+Fills the blanks the release command fills (the version, the day, the digests,
+the compose file's hash) with placeholders, then runs `check.py` over the result,
+and checks that the folder is named by the entry's id. Standard library only.
 """
 
 from __future__ import annotations
@@ -38,8 +40,17 @@ def filled(template: str, compose_sha: str = "") -> str:
 
 
 def main(argv: list[str]) -> int:
+    paths = argv or [str(p) for p in sorted(Path("apps").glob("*/entry.toml"))]
+    if not paths:
+        print("FAIL | apps/*/entry.toml | no entries found; run this from the repository's root")
+        return 1
     rc = 0
-    for arg in argv:
+    for arg in paths:
+        apps = tomllib.loads(Path(arg).read_text())["apps"]
+        folder = Path(arg).resolve().parent.name
+        if len(apps) != 1 or apps[0].get("id") != folder:
+            print(f"FAIL | {arg} | one entry, whose id is its folder's name ({folder})")
+            rc = 1
         with tempfile.TemporaryDirectory() as d:
             out = Path(d) / "catalog.toml"
             text = Path(arg).read_text()

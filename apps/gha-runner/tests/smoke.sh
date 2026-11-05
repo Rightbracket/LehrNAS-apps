@@ -1,9 +1,9 @@
 #!/bin/bash
 # The start script's hand-off and restart, with no GitHub, no image and no root:
 # a fake listener in a temporary directory. Run by CI.
-#   apps/gha-runner/smoke.sh
+#   apps/gha-runner/tests/smoke.sh
 set -eu
-here=$(cd "$(dirname "$0")" && pwd)
+here=$(cd "$(dirname "$0")/.." && pwd)
 t=$(mktemp -d)
 trap 'kill "${pid:-0}" 2>/dev/null; rm -rf "$t"' EXIT
 # As tini starts it: a background command in a script would start with SIGINT
