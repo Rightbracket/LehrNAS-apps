@@ -9,3 +9,37 @@ name = "LehrNAS official"
 # fetched from beside it.
 url = "https://raw.githubusercontent.com/Rightbracket/LehrNAS-apps/main/official.toml"
 key = "app-channel.pub"
+
+# FileFerry's entry in the official channel (spec-fileferry §8.3; the
+# format is spec-app-catalog §3). `lehrdev fileferry release` fills the
+# version, the day and the digests and writes the result into official.toml
+# in the LehrNAS-apps repository (#209); everything else is edited here, by hand.
+[[apps]]
+id = "fileferry"
+name = "FileFerry"
+summary = "Moves an old NAS's files into LehrNAS shares, verified from the drive."
+group = "Moving in"
+version = "fileferry-2026.1105.1"
+released = "2026-11-04"
+# The image's repository on Docker Hub (spec-fileferry §8.4); private until
+# launch, so the box needs a registry login for docker.io (#51).
+image = "docker.io/eshork/fileferry"
+# What the box pins (spec-apps §1): the manifest list's digest, which podman
+# records beside the arch's own, so either one matches at install.
+[apps.digests]
+list = "sha256:515ee6015f033d231f9bd2f10f03fd3f32ab9df191f49c8f8ee2c1e14486de5f"
+amd64 = "sha256:2cab6095a101e24fad985acfedc18a20fa7915f785c88daccd6e0c6699a3bb8a"
+arm64 = "sha256:02445dbc05d28c6d732f0fe4df94583ced0e7fcdb8179496caed3779c767a130"
+[apps.requirements]
+mem_mib = 1024
+cpus = 2
+[apps.permissions]
+# LAN port:container port, the form the box publishes (#210).
+ports = ["8700:8700/tcp"]
+shares = "read-write, chosen at install"
+internet = false
+[[apps.data]]
+name = "config"
+bytes = 8589934592
+[apps.user]
+kind = "default app user"
