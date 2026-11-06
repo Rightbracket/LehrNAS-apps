@@ -4,7 +4,7 @@
 # job's time to end at a stop (§9.4). The release writes the tag and the entry's hash.
 services:
   broker:
-    image: docker.io/eshork/gha-runner:gha-runner-2026.1105.2
+    image: docker.io/eshork/gha-runner:gha-runner-2026.1106.1
     read_only: true
     restart: always
     ports:
@@ -16,7 +16,7 @@ services:
       - config:/config
       - cache:/cache
   runner:
-    image: docker.io/eshork/gha-runner:gha-runner-2026.1105.2
+    image: docker.io/eshork/gha-runner:gha-runner-2026.1106.1
     read_only: true
     restart: always
     mem_limit: 3584m
