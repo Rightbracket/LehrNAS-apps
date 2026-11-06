@@ -15,8 +15,7 @@ released = ""
 # fails. The signature covers the hash.
 compose_path = "apps/gha-runner/compose.yaml"
 compose_sha256 = ""
-# Both services pin one manifest list, in a public repository: the free tier's
-# one private slot is FileFerry's, and this image holds nothing private (§2).
+# Both services pin one manifest list, in a public repository (§2).
 [[apps.images]]
 service = "broker"
 image = "docker.io/eshork/gha-runner"
