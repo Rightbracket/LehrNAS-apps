@@ -44,7 +44,7 @@ RUN set -eu; \
     rm -f /tmp/runner.tar.gz; \
     printf '%s\n' "$RUNNER_VERSION" > /opt/runner/VERSION; \
     chown -R 0:0 /opt/runner; \
-    for f in _diag _work .runner .credentials .credentials_rsaparams .env .path; do \
+    for f in _diag .runner .credentials .credentials_rsaparams .env .path; do \
       ln -s "/tmp/runner/$f" "/opt/runner/$f"; \
     done
 

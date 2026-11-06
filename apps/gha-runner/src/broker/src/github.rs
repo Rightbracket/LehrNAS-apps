@@ -296,11 +296,14 @@ impl GitHub for Curl {
         name: &str,
         labels: &[String],
     ) -> Result<Registered, String> {
+        // The real path, not the runner's relative default: `actions/checkout`
+        // scopes its credentials to the workspace's path, and git compares that
+        // with the real one, so through a link it has no token (LehrNAS #300).
         let body = serde_json::json!({
             "name": name,
             "runner_group_id": group,
             "labels": labels,
-            "work_folder": "_work",
+            "work_folder": "/tmp/runner/_work",
         })
         .to_string();
         let path = format!("{}/actions/runners/generate-jitconfig", base(scope));
@@ -444,6 +447,7 @@ mod tests {
         assert_eq!(body["name"], "n1");
         assert_eq!(body["runner_group_id"], 1);
         assert_eq!(body["labels"][0], "self-hosted");
+        assert_eq!(body["work_folder"], "/tmp/runner/_work");
     }
 
     #[test]
