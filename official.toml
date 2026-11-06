@@ -14,6 +14,7 @@ key = "app-channel.pub"
 # format is spec-app-catalog §3). `lehrdev fileferry release` fills the
 # version, the day and the digests and writes the result into official.toml
 # in the LehrNAS-apps repository (#209); everything else is edited here, by hand.
+
 [[apps]]
 id = "fileferry"
 name = "FileFerry"
@@ -41,5 +42,55 @@ internet = false
 [[apps.data]]
 name = "config"
 bytes = 8589934592
+[apps.user]
+kind = "default app user"
+
+# The GitHub runner's entry, without its version and digests (docs/spec-runner-app.md
+# §2 in LehrNAS; the format is spec-app-catalog §3). `lehrdev runner release` fills
+# the version, the day, compose.yaml's tag and hash and the digests, and writes the result into
+# official.toml; everything else is edited here, by hand.
+[[apps]]
+id = "gha-runner"
+name = "Runner for GitHub Actions"
+summary = "Runs your own repositories' GitHub Actions jobs on this box, one at a time."
+group = "Development"
+version = "gha-runner-2026.1105.2"
+released = "2026-11-05"
+# By path, not inline: a box parses inline compose while reading the catalog, and
+# one key it doesn't know (stop_grace_period, on a box older than this app) would
+# refuse the whole file, every other app with it. By path, only this app's install
+# fails. The signature covers the hash.
+compose_path = "apps/gha-runner/compose.yaml"
+compose_sha256 = "2670f4313f6837ac89c1d187b3aed8119d2d4a0515afd2e856b937c394d5dc44"
+# Both services pin one manifest list, in a public repository: the free tier's
+# one private slot is FileFerry's, and this image holds nothing private (§2).
+[[apps.images]]
+service = "broker"
+image = "docker.io/eshork/gha-runner"
+list = "sha256:da6d42060f410ddf54cbe38c8c9f81addfdc2574575bccf2a885fef78525387b"
+amd64 = "sha256:3005e5b41f7c7d917e30dbfea84bd66b741370b7ae1579ad2cc3a6a973dfddcf"
+arm64 = "sha256:4c0e23d90a995eeda5164039ef44a8fdf37b800ad3bdc70f330d6b906e682117"
+[[apps.images]]
+service = "runner"
+image = "docker.io/eshork/gha-runner"
+list = "sha256:da6d42060f410ddf54cbe38c8c9f81addfdc2574575bccf2a885fef78525387b"
+amd64 = "sha256:3005e5b41f7c7d917e30dbfea84bd66b741370b7ae1579ad2cc3a6a973dfddcf"
+arm64 = "sha256:4c0e23d90a995eeda5164039ef44a8fdf37b800ad3bdc70f330d6b906e682117"
+[apps.requirements]
+mem_mib = 4096
+cpus = 2
+[apps.permissions]
+ports = ["8711:8711/tcp"]
+shares = "none by default; a public repository refuses read-write"
+internet = true
+lan = false
+[apps.limits]
+cpu_weight = 20
+[[apps.data]]
+name = "config"
+bytes = 67108864
+[[apps.data]]
+name = "cache"
+bytes = 21474836480
 [apps.user]
 kind = "default app user"
