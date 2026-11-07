@@ -23,7 +23,8 @@ use std::time::Duration;
 pub struct Page {
     pub shared: Arc<Shared>,
     pub scope: Result<Scope, String>,
-    pub version: String,
+    /// The app release this broker's image was built from; empty if unknown.
+    pub release: String,
     /// GitHub's word on the scope now; `None` when it can't be read.
     pub exposure: Box<dyn Fn() -> Option<policy::Exposure> + Send + Sync>,
     pub wrong_password_delay: Duration,
@@ -305,6 +306,23 @@ async fn home(State(page): App, headers: HeaderMap) -> Response {
     Html(shell(&status_body(&page))).into_response()
 }
 
+/// The warning (§13.4), in one sentence since the broker can't tell which kind
+/// of image the runner service has.
+const UPDATE_SOON: &str = "Update this app soon from Apps on your LehrNAS. If you use your own runner image, rebuild it from this app's new version, then update it there.";
+/// The runner never spoke and GitHub never saw it (§13.2).
+const NO_WORD: &str = "No word from the runner service in 5 minutes, so it may not have started. If you chose your own image for it, check that it's built from this app's image.";
+
+/// The line when the runner's image and this app's come from different
+/// releases (§13.4); nothing stops because of it.
+fn releases_differ(runner: Option<&str>, app: &str) -> Option<String> {
+    let runner = runner?;
+    (!app.is_empty() && runner != app).then(|| {
+        format!(
+            "The runner service's image was built from {runner}, and this app is on {app}. Rebuild it so they match."
+        )
+    })
+}
+
 /// The state, in one sentence.
 fn sentence(
     w: Option<&Waiting>,
@@ -333,6 +351,44 @@ fn sentence(
                 if mins == 1 { "" } else { "s" }
             )
         }
+    }
+}
+
+/// The runner's version as it reported it, its clock, and the lines about its image.
+fn version_section(
+    b: &mut String,
+    page: &Page,
+    state: &crate::state::State,
+    no_word: bool,
+    now: u64,
+) {
+    b.push_str("<h2>Version</h2>");
+    match state.runner_version.as_deref() {
+        None => b.push_str("<p>Runner version not known yet.</p>"),
+        Some(v) => {
+            let _ = write!(b, "<p>Runner {}.", esc(v));
+            match policy::update_clock(v, &state.releases, now) {
+                None => b.push_str(" No newer version is known.</p>"),
+                Some(c) => {
+                    let _ = write!(b, " Version {} is out", esc(&c.newer));
+                    let _ = write!(
+                        b,
+                        ": GitHub stops giving this one jobs in {} day{}.</p>",
+                        c.days_left,
+                        if c.days_left == 1 { "" } else { "s" }
+                    );
+                    if c.warn {
+                        let _ = write!(b, "<p class=warn>{}</p>", esc(UPDATE_SOON));
+                    }
+                }
+            }
+        }
+    }
+    if let Some(line) = releases_differ(state.runner_release.as_deref(), &page.release) {
+        let _ = write!(b, "<p class=warn>{}</p>", esc(&line));
+    }
+    if no_word {
+        let _ = write!(b, "<p class=warn>{}</p>", esc(NO_WORD));
     }
 }
 
@@ -371,12 +427,7 @@ fn status_body(page: &Page) -> String {
         b.push_str("<p>The cache empties when the current job ends.</p>");
     }
     if let Some(Waiting::Refused(r)) = &view.waiting {
-        let _ = write!(
-            b,
-            "<div class=warn><p><code>{}</code></p><p>{}</p>",
-            esc(&r.line),
-            esc(&r.sentence)
-        );
+        let _ = write!(b, "<div class=warn><p>{}</p>", esc(&r.sentence));
         if r.can_confirm {
             let _ = write!(
                 b,
@@ -392,23 +443,7 @@ fn status_body(page: &Page) -> String {
     if view.update_seen {
         b.push_str("<p class=warn>The runner's output says <code>Runner update in progress</code>: GitHub offered an update. It can't apply here, because the image is read-only, but it fetches into memory on every job until a new version of this app is installed.</p>");
     }
-    b.push_str("<h2>Version</h2>");
-    let _ = write!(b, "<p>Runner {}.", esc(&page.version));
-    match policy::update_clock(&page.version, &state.releases, now) {
-        None => b.push_str(" No newer version is known.</p>"),
-        Some(c) => {
-            let _ = write!(b, " Version {} is out", esc(&c.newer));
-            let _ = write!(
-                b,
-                ": GitHub stops giving this one jobs in {} day{}.</p>",
-                c.days_left,
-                if c.days_left == 1 { "" } else { "s" }
-            );
-            if c.warn {
-                b.push_str("<p class=warn>Update this app soon. It updates from Apps on your LehrNAS when a new version is in the catalog.</p>");
-            }
-        }
-    }
+    version_section(&mut b, page, &state, view.no_word, now);
     b.push_str("<h2>Actions</h2>");
     if state.drain {
         b.push_str("<form method=post action=/resume><button>Resume</button></form>");
@@ -463,7 +498,7 @@ async fn status_json(State(page): App, headers: HeaderMap) -> Response {
     axum::Json(serde_json::json!({
         "state": phase,
         "drain": state.drain,
-        "version": page.version,
+        "version": state.runner_version,
         "job": state.current.and_then(|c| c.job),
     }))
     .into_response()
@@ -486,7 +521,7 @@ mod tests {
         Arc::new(Page {
             shared: Shared::new(Saved::default(), File::new(&d)),
             scope: Scope::parse("me/thing"),
-            version: "2.338.2".into(),
+            release: "gha-runner-2026.1106.2".into(),
             exposure: Box::new(move || exposure.clone()),
             wrong_password_delay: Duration::from_millis(5),
         })
@@ -612,13 +647,14 @@ mod tests {
         .unwrap_err();
         p.shared.lock().1.waiting = Some(Waiting::Refused(r));
         let (_, _, home) = send(&p, "GET", "/", "", Some(&c)).await;
-        assert!(
-            home.contains("REFUSED | APP SETUP | gha-runner | me/thing is public"),
-            "{home}"
-        );
+        assert!(home.contains("me/thing is public."), "{home}");
         assert!(
             home.contains("Anyone who can open a pull request on this repository"),
             "{home}"
+        );
+        assert!(
+            !home.contains("REFUSED"),
+            "a log line stays in the log: {home}"
         );
         let (code, ..) = send(&p, "POST", "/confirm-public", "typed=thing", Some(&c)).await;
         assert_eq!(code, StatusCode::CONFLICT);
@@ -658,14 +694,83 @@ mod tests {
         let c = signed(&p).await;
         let now = clock::now();
         p.shared
-            .change(|s| s.releases = vec![("v2.339.0".into(), now - 21 * 86_400)])
+            .change(|s| {
+                s.releases = vec![("v2.339.0".into(), now - 21 * 86_400)];
+                s.runner_version = Some("2.338.2".into());
+            })
             .unwrap();
         let (_, _, home) = send(&p, "GET", "/", "", Some(&c)).await;
         assert!(home.contains("in 9 days"), "{home}");
-        assert!(home.contains("Update this app soon"), "{home}");
+        assert!(home.contains(&esc(UPDATE_SOON)), "{home}");
         assert!(home.contains("no container support"), "{home}");
         p.shared.lock().1.update_seen = true;
         let (_, _, home) = send(&p, "GET", "/", "", Some(&c)).await;
         assert!(home.contains("Runner update in progress"), "{home}");
+    }
+
+    #[tokio::test]
+    async fn the_days_left_count_from_what_the_runner_reported() {
+        let p = page("reported", None);
+        let c = signed(&p).await;
+        let now = clock::now();
+        p.shared
+            .change(|s| s.releases = vec![("v2.339.0".into(), now - 21 * 86_400)])
+            .unwrap();
+        let (_, _, home) = send(&p, "GET", "/", "", Some(&c)).await;
+        assert!(home.contains("Runner version not known yet."), "{home}");
+        assert!(!home.contains("in 9 days"), "no clock yet: {home}");
+        assert!(!home.contains("Update this app soon"), "{home}");
+
+        p.shared
+            .change(|s| s.runner_version = Some("2.339.0".into()))
+            .unwrap();
+        let (_, _, home) = send(&p, "GET", "/", "", Some(&c)).await;
+        assert!(home.contains("Runner 2.339.0."), "{home}");
+        assert!(home.contains("No newer version is known."), "{home}");
+        assert!(!home.contains("not known yet"), "{home}");
+
+        let (_, _, json) = send(&p, "GET", "/status.json", "", Some(&c)).await;
+        assert!(json.contains(r#""version":"2.339.0""#), "{json}");
+    }
+
+    #[tokio::test]
+    async fn two_releases_that_differ_are_said_and_two_that_match_are_not() {
+        let p = page("differ", None);
+        let c = signed(&p).await;
+        let (_, _, home) = send(&p, "GET", "/", "", Some(&c)).await;
+        assert!(!home.contains("Rebuild it"), "nothing heard: {home}");
+        p.shared
+            .change(|s| s.runner_release = Some("gha-runner-2026.1106.1".into()))
+            .unwrap();
+        let (_, _, home) = send(&p, "GET", "/", "", Some(&c)).await;
+        let line = "The runner service&#39;s image was built from gha-runner-2026.1106.1, and this app is on gha-runner-2026.1106.2. Rebuild it so they match.";
+        assert!(home.contains(line), "{home}");
+        p.shared
+            .change(|s| s.runner_release = Some("gha-runner-2026.1106.2".into()))
+            .unwrap();
+        let (_, _, home) = send(&p, "GET", "/", "", Some(&c)).await;
+        assert!(!home.contains("Rebuild it"), "{home}");
+        assert_eq!(releases_differ(Some("a"), ""), None, "our own isn't known");
+    }
+
+    #[tokio::test]
+    async fn a_silent_runner_and_the_card_are_on_the_page() {
+        let p = page("silent", None);
+        let c = signed(&p).await;
+        let (_, _, home) = send(&p, "GET", "/", "", Some(&c)).await;
+        assert!(!home.contains("No word from the runner"), "{home}");
+        p.shared.lock().1.no_word = true;
+        let (_, _, home) = send(&p, "GET", "/", "", Some(&c)).await;
+        assert!(home.contains(&esc(NO_WORD)), "{home}");
+    }
+
+    #[tokio::test]
+    async fn the_page_promises_no_label() {
+        let p = page("label", None);
+        let c = signed(&p).await;
+        let (_, _, home) = send(&p, "GET", "/", "", Some(&c)).await;
+        assert!(!home.to_lowercase().contains("lehrnas-"), "{home}");
+        assert!(!home.contains("`lehrnas`"), "{home}");
+        assert!(!home.contains("label"), "{home}");
     }
 }

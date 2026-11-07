@@ -133,7 +133,7 @@ pub fn gate(
                 return Err(refused(
                     &label,
                     "is public: anyone who can open a pull request may be able to run code on this box",
-                    PUBLIC_WARNING,
+                    &format!("{label} is public. {PUBLIC_WARNING}"),
                     true,
                 ));
             }
@@ -141,7 +141,9 @@ pub fn gate(
                 return Err(refused(
                     &label,
                     "is public and doesn't ask for approval from every outside contributor",
-                    "On GitHub, under the repository's Settings, Actions, General, set approval for fork pull requests to \"Require approval for all external contributors\". Jobs stay stopped until then.",
+                    &format!(
+                        "{label} is public. On GitHub, under the repository's Settings, Actions, General, set approval for fork pull requests to \"Require approval for all external contributors\". Jobs stay stopped until then."
+                    ),
                     false,
                 ));
             }
@@ -152,7 +154,10 @@ pub fn gate(
                         "is public and this app has read-write access to the share {}",
                         g.share
                     ),
-                    "A public repository can't use read-write shares here. Make the grant read-only or remove it. Jobs stay stopped until then.",
+                    &format!(
+                        "{label} is public, and this app has read-write access to the share {}. A public repository can't use read-write shares here. Make the grant read-only or remove it. Jobs stay stopped until then.",
+                        g.share
+                    ),
                     false,
                 ));
             }
@@ -294,6 +299,22 @@ pub fn decide(r: &Round) -> Step {
     }
 }
 
+/// What this round says about §13.2's silent runner: `Some(true)` when GitHub
+/// shows it offline and it hasn't reported by the end of the grace, `Some(false)`
+/// once GitHub shows it online, `None` when this round doesn't tell. The offline
+/// runner is removed and the next one takes its place at that same moment, so the
+/// answer has to outlast the runner it was about.
+#[must_use]
+pub fn no_word(c: &Current, reported: bool) -> Option<bool> {
+    match c.seen {
+        Some(RunnerSeen::Idle | RunnerSeen::Busy) => Some(false),
+        Some(RunnerSeen::Offline) if !reported && c.written_secs_ago >= OFFLINE_GRACE_SECS => {
+            Some(true)
+        }
+        _ => None,
+    }
+}
+
 /// `cache` empties when the admin asked or when it has grown past its cap.
 #[must_use]
 pub fn empty_cache(asked: bool, bytes: u64) -> bool {
@@ -343,8 +364,26 @@ pub fn update_clock(mine: &str, releases: &[(String, u64)], now: u64) -> Option<
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Said {
     Started(String),
-    Finished { job: String, result: String },
+    Finished {
+        job: String,
+        result: String,
+    },
     UpdateInProgress,
+    /// The runner's start, once it has taken its config (§13.4). What can't be
+    /// a version or a release's name is `None`.
+    Report {
+        runner: Option<String>,
+        release: Option<String>,
+    },
+}
+
+/// A release's name as the page may show it.
+fn release_word(w: &str) -> Option<String> {
+    (!w.is_empty()
+        && w.len() <= 64
+        && w.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')))
+    .then(|| w.to_owned())
 }
 
 /// The lines the page cares about, with anything unprintable taken out.
@@ -356,6 +395,18 @@ pub fn said(line: &str) -> Option<Said> {
         .split_once("Z: ")
         .map_or(clean.as_str(), |(_, t)| t)
         .trim();
+    if let Some(rest) = text.strip_prefix("Runner report: ") {
+        let field = |key: &str| {
+            rest.split(' ')
+                .find_map(|w| w.strip_prefix(key)?.strip_prefix('='))
+        };
+        return Some(Said::Report {
+            runner: field("version")
+                .filter(|v| version(v).is_some())
+                .map(str::to_owned),
+            release: field("release").and_then(release_word),
+        });
+    }
     if text.contains("Runner update in progress") {
         return Some(Said::UpdateInProgress);
     }
@@ -473,7 +524,7 @@ mod tests {
             "REFUSED | APP SETUP | gha-runner | me/thing is public: anyone who can open a pull request may be able to run code on this box"
         );
         assert!(e.can_confirm);
-        assert_eq!(e.sentence, PUBLIC_WARNING);
+        assert!(e.sentence.ends_with(PUBLIC_WARNING), "{e:?}");
         assert_eq!(
             decide(&Round {
                 gate: refusal(),
@@ -712,6 +763,74 @@ mod tests {
             Some(Said::Started("a[31mb".into())),
             "no control characters reach the page"
         );
+    }
+
+    #[test]
+    fn the_runners_report_reads_and_what_isnt_a_version_or_a_release_is_dropped() {
+        assert_eq!(
+            said("Runner report: version=2.338.2 release=gha-runner-2026.1106.2"),
+            Some(Said::Report {
+                runner: Some("2.338.2".into()),
+                release: Some("gha-runner-2026.1106.2".into())
+            })
+        );
+        assert_eq!(
+            said("Runner report: version= release="),
+            Some(Said::Report {
+                runner: None,
+                release: None
+            }),
+            "an image without the files still reports that it started"
+        );
+        assert_eq!(
+            said("Runner report: version=soon release=<b>x"),
+            Some(Said::Report {
+                runner: None,
+                release: None
+            })
+        );
+    }
+
+    #[test]
+    fn no_word_is_only_an_offline_runner_silent_past_the_grace() {
+        let c = |seen, written_secs_ago| Current {
+            seen: Some(seen),
+            written_secs_ago,
+            busy_secs: 0,
+            stop_already_asked: false,
+        };
+        let grace = OFFLINE_GRACE_SECS;
+        assert_eq!(no_word(&c(RunnerSeen::Offline, grace), false), Some(true));
+        assert_eq!(no_word(&c(RunnerSeen::Offline, grace - 1), false), None);
+        assert_eq!(no_word(&c(RunnerSeen::Offline, grace), true), None);
+        assert_eq!(no_word(&c(RunnerSeen::Idle, grace), false), Some(false));
+        assert_eq!(no_word(&c(RunnerSeen::Busy, grace), false), Some(false));
+        assert_eq!(no_word(&c(RunnerSeen::Gone, grace), false), None);
+    }
+
+    #[test]
+    fn a_refusals_sentence_keeps_every_fact_of_its_line() {
+        let s = Scope::parse("me/thing").unwrap();
+        let e = gate(&s, &Exposure::Public, None, None, &[]).unwrap_err();
+        assert!(e.sentence.starts_with("me/thing is public. "), "{e:?}");
+        assert!(e.sentence.ends_with(PUBLIC_WARNING), "{e:?}");
+        let e = gate(&s, &Exposure::Public, Some("me/thing"), Some("none"), &[]).unwrap_err();
+        assert!(e.sentence.starts_with("me/thing is public. "), "{e:?}");
+        let g = [Grant {
+            share: "builds".into(),
+            read_write: true,
+        }];
+        let e = gate(
+            &s,
+            &Exposure::Public,
+            Some("me/thing"),
+            Some(STRICTEST_FORK_APPROVAL),
+            &g,
+        )
+        .unwrap_err();
+        assert!(e.sentence.contains("the share builds"), "{e:?}");
+        assert!(e.line.starts_with("REFUSED | "), "the log keeps its line");
+        assert!(!e.sentence.contains('|'), "{e:?}");
     }
 
     #[test]

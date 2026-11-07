@@ -25,6 +25,8 @@ pub struct View {
     pub queued: Option<u64>,
     /// `Runner update in progress` appeared in the runner's output (§8).
     pub update_seen: bool,
+    /// GitHub shows the runner offline and it never reported (§13.2).
+    pub no_word: bool,
 }
 
 /// The state and the view, with a way to wake the rounds.
@@ -95,6 +97,24 @@ impl Shared {
                     c.job.get_or_insert(job);
                     c.result = Some(result);
                 }
+            }
+            // The first report of each runner stands, and it comes before its
+            // listener starts. So a job can't overwrite it, and a job sending
+            // these in a loop can't turn into one disk write after another.
+            Said::Report { runner, release } => {
+                let Some(c) = g.0.current.as_mut() else {
+                    return;
+                };
+                if c.reported {
+                    return;
+                }
+                c.reported = true;
+                g.0.runner_version = runner;
+                g.0.runner_release = release;
+                g.1.no_word = false;
+                // A failed save loses a line on a page, and the next runner
+                // reports again.
+                let _ = self.file.save(&g.0);
             }
         }
     }
@@ -207,9 +227,12 @@ impl Engine {
     pub fn round(&self, now: u64) -> (Step, u64) {
         self.refresh_releases(now);
         let (gate, group) = self.gate();
+        let no_word;
         let current = self.observe(now);
         let round = {
             let g = self.shared.lock();
+            let reported = g.0.current.as_ref().is_some_and(|c| c.reported);
+            no_word = current.as_ref().and_then(|c| policy::no_word(c, reported));
             Round {
                 set_up: g.0.password_hash.is_some(),
                 drain: g.0.drain,
@@ -224,6 +247,21 @@ impl Engine {
         let queued = self.scope.as_ref().ok().and_then(|s| self.github.queued(s));
         let mut g = self.shared.lock();
         g.1.queued = queued;
+        if let Some(said) = no_word {
+            g.1.no_word = said;
+        }
+        // With no runner wanted, there's none to be silent.
+        if matches!(
+            step,
+            Step::Wait(
+                Waiting::NoPassword
+                    | Waiting::Drained
+                    | Waiting::Refused(_)
+                    | Waiting::Unreadable(_)
+            )
+        ) {
+            g.1.no_word = false;
+        }
         let waiting = match &step {
             Step::Wait(w) => Some(w.clone()),
             _ => g.1.waiting.clone(),
@@ -773,6 +811,143 @@ mod tests {
         *t.hub.seen.lock().unwrap() = Some(RunnerSeen::Gone);
         t.e.round(110);
         assert!(t.e.shared.lock().0.jobs.is_empty());
+    }
+
+    const REPORT: &str = "Runner report: version=2.338.2 release=gha-runner-2026.1106.2";
+
+    #[test]
+    fn the_runners_version_comes_from_its_report_and_survives_a_restart() {
+        let t = setup("report");
+        t.e.round(100);
+        assert_eq!(t.e.shared.lock().0.runner_version, None);
+        t.e.shared.heard(REPORT);
+        let saved = t.e.shared.file.load().unwrap();
+        assert_eq!(saved.runner_version.as_deref(), Some("2.338.2"));
+        assert_eq!(
+            saved.runner_release.as_deref(),
+            Some("gha-runner-2026.1106.2")
+        );
+    }
+
+    #[test]
+    fn a_runners_first_report_stands_and_the_next_runner_reports_again() {
+        let t = setup("forged");
+        t.e.round(100);
+        t.e.shared.heard(REPORT);
+        t.e.shared
+            .heard("Runner report: version=9.9.9 release=forged");
+        assert_eq!(
+            t.e.shared.lock().0.runner_version.as_deref(),
+            Some("2.338.2")
+        );
+        job_done(&t, 110);
+        t.e.round(200);
+        t.e.shared
+            .heard("Runner report: version=2.339.0 release=gha-runner-2026.1201.1");
+        assert_eq!(
+            t.e.shared.lock().0.runner_version.as_deref(),
+            Some("2.339.0")
+        );
+    }
+
+    #[test]
+    fn a_report_with_no_runner_registered_is_dropped() {
+        let t = setup("orphan");
+        t.e.shared.heard(REPORT);
+        assert_eq!(t.e.shared.lock().0.runner_version, None);
+    }
+
+    #[test]
+    fn no_decision_rests_on_the_report() {
+        let run = |name: &str, line: Option<&str>| {
+            let t = setup(name);
+            let mut steps = vec![t.e.round(100).0];
+            if let Some(l) = line {
+                t.e.shared.heard(l);
+            }
+            for (seen, at) in [
+                (RunnerSeen::Idle, 110),
+                (RunnerSeen::Busy, 120),
+                (RunnerSeen::Gone, 130),
+            ] {
+                *t.hub.seen.lock().unwrap() = Some(seen);
+                steps.push(t.e.round(at).0);
+            }
+            steps
+        };
+        let plain = run("plain", None);
+        assert_eq!(
+            plain,
+            run("old", Some("Runner report: version=0.0.1 release=x"))
+        );
+        assert_eq!(
+            plain,
+            run("new", Some("Runner report: version=99.0.0 release=y"))
+        );
+    }
+
+    #[test]
+    fn a_silent_runner_says_so_past_the_grace_and_through_its_replacement() {
+        let t = setup("silent");
+        t.e.round(100);
+        t.e.round(100 + policy::OFFLINE_GRACE_SECS - 1);
+        assert!(!t.e.shared.lock().1.no_word, "inside the grace");
+        let at = 100 + policy::OFFLINE_GRACE_SECS;
+        assert_eq!(t.e.round(at).0, Step::Remove);
+        assert!(t.e.shared.lock().1.no_word);
+        assert_eq!(t.e.round(at + 1).0, Step::Forget);
+        assert_eq!(t.e.round(at + 2).0, Step::Register);
+        t.e.round(at + 3);
+        assert!(t.e.shared.lock().1.no_word, "still true of the next one");
+        t.e.shared.heard(REPORT);
+        assert!(!t.e.shared.lock().1.no_word, "it reported");
+    }
+
+    #[test]
+    fn a_runner_that_reported_or_shows_online_is_never_called_silent() {
+        let t = setup("spoke");
+        t.e.round(100);
+        t.e.shared.heard(REPORT);
+        t.e.round(100 + policy::OFFLINE_GRACE_SECS);
+        assert!(!t.e.shared.lock().1.no_word);
+
+        // An image from before the report: GitHub's word that it's online wins.
+        let t = setup("online");
+        t.e.round(100);
+        t.e.round(100 + policy::OFFLINE_GRACE_SECS);
+        assert!(t.e.shared.lock().1.no_word);
+        t.e.round(101 + policy::OFFLINE_GRACE_SECS);
+        t.e.round(102 + policy::OFFLINE_GRACE_SECS);
+        *t.hub.seen.lock().unwrap() = Some(RunnerSeen::Idle);
+        t.e.round(103 + policy::OFFLINE_GRACE_SECS);
+        assert!(!t.e.shared.lock().1.no_word);
+    }
+
+    #[test]
+    fn draining_ends_the_silent_line() {
+        let t = setup("silentdrain");
+        t.e.round(100);
+        t.e.round(100 + policy::OFFLINE_GRACE_SECS);
+        assert!(t.e.shared.lock().1.no_word);
+        t.e.shared.change(|s| s.drain = true).unwrap();
+        t.e.round(101 + policy::OFFLINE_GRACE_SECS);
+        assert_eq!(
+            t.e.round(102 + policy::OFFLINE_GRACE_SECS).0,
+            Step::Wait(Waiting::Drained)
+        );
+        assert!(!t.e.shared.lock().1.no_word);
+    }
+
+    #[test]
+    fn with_no_label_set_it_registers_with_only_what_every_runner_carries() {
+        let mut t = setup("labels");
+        t.e.labels = crate::labels("", "x86_64");
+        t.e.round(100);
+        let calls = t.hub.calls.lock().unwrap();
+        assert!(
+            calls[0].ends_with(r#"["self-hosted", "Linux", "X64"]"#),
+            "{calls:?}"
+        );
     }
 
     #[test]

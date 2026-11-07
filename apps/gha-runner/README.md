@@ -27,6 +27,10 @@ repositories, one job at a time, on a box that is usually idle. The design is
   and the last 50 jobs, with *Drain*, *Resume* and *Clear cache*. The first visit
   sets its password, and no job runs before then, because a job shares the pod's
   network and can reach the page too.
+- **The versions on the page** are what the runner's start reports on a loopback
+  port after it takes its config: the runner's version, and the release its image
+  was built from (the `RELEASE` file beside the start scripts). A job can send these
+  too, so they only ever fill the page.
 
 ## Settings
 
@@ -35,7 +39,7 @@ repositories, one job at a time, on a box that is usually idle. The design is
 | `GITHUB_TOKEN` | broker | A fine-grained token. "Self-hosted runners: write" for an organisation's runner group; "Administration: write" for one repository |
 | `RUNNER_SCOPE` | broker | `owner/repository`, or `org/<organisation>/<runner group>` |
 | `RUNNER_JOB_HOURS` | any | A job's limit, default 6 |
-| `RUNNER_LABELS` | any | Labels on top of `self-hosted`, `Linux` and the architecture, comma-separated; default `lehrnas` |
+| `RUNNER_LABELS` | any | Labels on top of `self-hosted`, `Linux` and the architecture, comma-separated. None by default, so this runner can take any job in its group that asks for `self-hosted`. Set a label and name it in your workflows, or use a tight scope, if that matters. |
 | `RUNNER_RESET_PASSWORD` | any | Clears the page's password at the next start. Give it a new word each time: a value already acted on does nothing |
 
 ## Public repositories

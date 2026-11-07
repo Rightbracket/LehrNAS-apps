@@ -11,6 +11,9 @@ ARG TARGETARCH
 ARG RUNNER_VERSION=2.338.2
 ARG RUNNER_SHA256_amd64=baebf204307bac6193480852732f0aba2ae97b6c5597c244f4d5558390147c40
 ARG RUNNER_SHA256_arm64=670adb2f268fe21dcbb58b3db0e0aa9d5b3bddfe2c651481336e561ff86de945
+# This image's own tag, from `lehrdev runner release`. An image built without it
+# would never say which release it is, so the build fails.
+ARG APP_RELEASE
 
 # tini: a real PID 1, or a job's orphans stay as zombies.
 # curl: the broker's way to GitHub (no TLS stack in the binary).
@@ -51,7 +54,9 @@ RUN set -eu; \
 COPY broker-bin/${TARGETARCH}/gha-runner-broker /usr/local/bin/gha-runner-broker
 COPY start.sh runner-start.sh /usr/local/lib/gha-runner/
 COPY docker-stub /usr/local/bin/docker
-RUN chmod 0755 /usr/local/bin/gha-runner-broker /usr/local/bin/docker /usr/local/lib/gha-runner/*.sh
+RUN chmod 0755 /usr/local/bin/gha-runner-broker /usr/local/bin/docker /usr/local/lib/gha-runner/*.sh \
+ && test -n "$APP_RELEASE" \
+ && printf '%s\n' "$APP_RELEASE" > /usr/local/lib/gha-runner/RELEASE
 
 USER 1001:1001
 WORKDIR /opt/runner

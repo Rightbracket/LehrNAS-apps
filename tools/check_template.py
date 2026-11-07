@@ -6,7 +6,9 @@
 Run from the repository's root. With no arguments, every `apps/*/entry.toml`.
 Fills the blanks the release command fills (the version, the day, the digests,
 the compose file's hash) with placeholders, then runs `check.py` over the result,
-and checks that the folder is named by the entry's id. Standard library only.
+and checks that the folder is named by the entry's id and that nothing in it names
+this project's own organisation or machines: an app stays usable by any owner.
+Standard library only.
 """
 
 from __future__ import annotations
@@ -21,6 +23,24 @@ from pathlib import Path
 import check
 
 ZERO = "sha256:" + "0" * 64
+# The maintainers' own names, which belong in no app (spec-runner-app §13.5).
+PROJECT_NAMES = ("rightbracket", "lehr-rig")
+# Built things, not written ones.
+SKIP_DIRS = {"target", "broker-bin", "__pycache__", "node_modules"}
+
+
+def project_names_in(folder: Path) -> list[str]:
+    """`path:line: name` for each use of a project name in an app's folder."""
+    found = []
+    for p in sorted(folder.rglob("*")):
+        if not p.is_file() or SKIP_DIRS.intersection(p.relative_to(folder).parts):
+            continue
+        text = p.read_bytes().decode("utf-8", "ignore")
+        for n, line in enumerate(text.splitlines(), 1):
+            for name in PROJECT_NAMES:
+                if name in line.lower():
+                    found.append(f"{p}:{n}: {name}")
+    return found
 
 
 def filled(template: str, compose_sha: str = "") -> str:
@@ -50,6 +70,9 @@ def main(argv: list[str]) -> int:
         folder = Path(arg).resolve().parent.name
         if len(apps) != 1 or apps[0].get("id") != folder:
             print(f"FAIL | {arg} | one entry, whose id is its folder's name ({folder})")
+            rc = 1
+        for hit in project_names_in(Path(arg).parent):
+            print(f"FAIL | {hit} | this project's own name, in an app's folder")
             rc = 1
         with tempfile.TemporaryDirectory() as d:
             out = Path(d) / "catalog.toml"

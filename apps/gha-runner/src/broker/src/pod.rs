@@ -11,9 +11,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Where the runner's start looks; it appears whole, by a rename.
-pub const JIT_DIR: &str = "lehr-runner-jit";
+pub const JIT_DIR: &str = "gha-runner-jit";
 /// Written to ask the runner's start to stop its listener.
-pub const STOP_FILE: &str = "lehr-runner-stop";
+pub const STOP_FILE: &str = "gha-runner-stop";
 
 /// The seam the tests fake.
 pub trait Pod: Send + Sync {

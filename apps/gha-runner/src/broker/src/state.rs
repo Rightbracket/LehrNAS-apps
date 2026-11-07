@@ -34,6 +34,9 @@ pub struct Runner {
     pub result: Option<String>,
     #[serde(default)]
     pub stop_asked: bool,
+    /// This runner's start has reported its versions (§13.4).
+    #[serde(default)]
+    pub reported: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,6 +72,13 @@ pub struct State {
     pub releases: Vec<(String, u64)>,
     #[serde(default)]
     pub releases_read: u64,
+    /// The runner service's version and the app release its image was built
+    /// from, as last heard (§13.4). Kept here because an idle runner reports
+    /// only once, and the broker can restart without it. Display only.
+    #[serde(default)]
+    pub runner_version: Option<String>,
+    #[serde(default)]
+    pub runner_release: Option<String>,
 }
 
 impl State {

@@ -9,8 +9,9 @@ RUNNER=${RUNNER_DIR:-/opt/runner}
 STATE=${RUNNER_STATE_DIR:-/tmp/runner}
 SHM=${RUNNER_SHM_DIR:-/dev/shm}
 LISTENER=${RUNNER_LISTENER:-bin/Runner.Listener}
-JIT="$SHM/lehr-runner-jit"
-STOP="$SHM/lehr-runner-stop"
+JIT="$SHM/gha-runner-jit"
+STOP="$SHM/gha-runner-stop"
+RELEASE_FILE=${RUNNER_RELEASE_FILE:-/usr/local/lib/gha-runner/RELEASE}
 REPORT_PORT=${RUNNER_REPORT_PORT:-8712}
 # A job past its limit gets this long to end before it's killed.
 STOP_WAIT=${RUNNER_STOP_WAIT:-60}
@@ -32,6 +33,12 @@ for f in .runner .credentials .credentials_rsaparams; do
   mv -f "$JIT/$f" "$STATE/$f" && chmod 600 "$STATE/$f" || exit 1
 done
 rm -rf "$JIT"
+
+# Which runner this is and the app release its image was built from, for the page
+# (§13.4). Once, before the listener starts. Nothing here depends on it being heard.
+printf 'Runner report: version=%s release=%s\n' \
+  "$(cat "$RUNNER/VERSION" 2>/dev/null)" "$(cat "$RELEASE_FILE" 2>/dev/null)" \
+  2>/dev/null > "/dev/udp/127.0.0.1/$REPORT_PORT"
 
 # A job's only disk is `cache`: toolchains and downloads go there, the rest in RAM.
 export HOME="$STATE/home"

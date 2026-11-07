@@ -23,6 +23,8 @@ use std::time::Duration;
 const PORT: u16 = 8711;
 /// Where the runner's start sends the lines of its output the page wants.
 const REPORT_PORT: u16 = 8712;
+/// The app release this image was built from, beside the start scripts (§13.4).
+const RELEASE_FILE: &str = "/usr/local/lib/gha-runner/RELEASE";
 
 /// The environment. Its `Debug` leaves the token out, so no logging of this
 /// value can print it.
@@ -33,7 +35,7 @@ struct Settings {
     labels: Vec<String>,
     job_hours: u64,
     reset: Option<String>,
-    version: String,
+    release: String,
     config: String,
 }
 
@@ -80,10 +82,7 @@ fn settings() -> Settings {
         scope: var("RUNNER_SCOPE"),
         api: std::env::var("RUNNER_GITHUB_API")
             .unwrap_or_else(|_| "https://api.github.com".to_owned()),
-        labels: labels(
-            &std::env::var("RUNNER_LABELS").unwrap_or_else(|_| "lehrnas".to_owned()),
-            std::env::consts::ARCH,
-        ),
+        labels: labels(&var("RUNNER_LABELS"), std::env::consts::ARCH),
         job_hours: var("RUNNER_JOB_HOURS")
             .parse()
             .ok()
@@ -92,8 +91,9 @@ fn settings() -> Settings {
         reset: std::env::var("RUNNER_RESET_PASSWORD")
             .ok()
             .filter(|v| !v.is_empty()),
-        version: std::fs::read_to_string("/opt/runner/VERSION")
-            .map_or_else(|_| "unknown".to_owned(), |v| v.trim().to_owned()),
+        release: std::fs::read_to_string(RELEASE_FILE)
+            .map(|v| v.trim().to_owned())
+            .unwrap_or_default(),
         config: std::env::var("RUNNER_CONFIG_DIR").unwrap_or_else(|_| "/config".to_owned()),
     }
 }
@@ -202,7 +202,7 @@ async fn run() -> Result<(), String> {
     let page = Arc::new(web::Page {
         shared,
         scope,
-        version: s.version.clone(),
+        release: s.release.clone(),
         exposure: Box::new(move || {
             let sc = exposure_scope.as_ref().ok()?;
             exposure_hub.facts(sc).ok().map(|f| f.exposure)
@@ -231,7 +231,7 @@ mod tests {
             labels: vec![],
             job_hours: 6,
             reset: None,
-            version: String::new(),
+            release: String::new(),
             config: String::new(),
         };
         let shown = format!("{s:?}");
@@ -242,8 +242,8 @@ mod tests {
     #[test]
     fn labels_start_with_what_every_runner_carries() {
         assert_eq!(
-            labels("lehrnas, rig ,", "x86_64"),
-            ["self-hosted", "Linux", "X64", "lehrnas", "rig"]
+            labels("builds, rig ,", "x86_64"),
+            ["self-hosted", "Linux", "X64", "builds", "rig"]
         );
         assert_eq!(labels("", "aarch64"), ["self-hosted", "Linux", "ARM64"]);
     }
@@ -263,7 +263,7 @@ mod tests {
             labels: vec![],
             job_hours: 6,
             reset: None,
-            version: String::new(),
+            release: String::new(),
             config: String::new(),
         };
         let e = connect(&s)
