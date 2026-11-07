@@ -276,6 +276,20 @@ def check_rest(f: Findings, e: dict) -> None:
         not isinstance(limits["cpu_weight"], int) or not 1 <= limits["cpu_weight"] <= 100
     ):
         f.fail(where, "limits.cpu_weight: a whole number from 1 to 100")
+    settings = e.get("settings", {})
+    if not isinstance(settings, dict):
+        f.fail(where, "settings: a table per key")
+    else:
+        for key, said in settings.items():
+            if not isinstance(said, dict):
+                f.fail(where, f"settings.{key}: a table")
+                continue
+            words = said.get("help")
+            if words is not None and (not isinstance(words, str) or "\n" in words):
+                f.fail(where, f"settings.{key}.help: one line of text")
+            for k in ("secret", "generate"):
+                if k in said and not isinstance(said[k], bool):
+                    f.fail(where, f"settings.{key}.{k}: true or false")
     names: set[str] = set()
     for d in e.get("data", []):
         if not isinstance(d, dict) or not isinstance(d.get("name"), str) or not d["name"]:

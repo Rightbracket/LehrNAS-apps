@@ -93,3 +93,11 @@ name = "cache"
 bytes = 21474836480
 [apps.user]
 kind = "default app user"
+[apps.settings.GITHUB_TOKEN]
+help = "A fine-grained personal access token, not the registration token from GitHub's Add runner page. Give it Self-hosted runners: write for an organisation, or Administration: write for one repository. Administration: write is broad, so use an organisation if you have one."
+secret = true
+generate = false
+[apps.settings.RUNNER_SCOPE]
+help = "Where the runner takes jobs from: owner/repository for one repository, or org/<organisation>/<runner group> for an organisation's runner group. It isn't a secret."
+secret = false
+generate = false
