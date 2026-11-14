@@ -59,32 +59,37 @@ kind = "default app user"
 # §2 in LehrNAS; the format is spec-app-catalog §3). `lehrdev runner release` fills
 # the version, the day, compose.yaml's tag and hash and the digests, and writes the result into
 # official.toml; everything else is edited here, by hand.
+
+# The GitHub runner's entry, without its version and digests (docs/spec-runner-app.md
+# §2 in LehrNAS; the format is spec-app-catalog §3). `lehrdev runner release` fills
+# the version, the day, compose.yaml's tag and hash and the digests, and writes the result into
+# official.toml; everything else is edited here, by hand.
 [[apps]]
 id = "gha-runner"
 name = "Runner for GitHub Actions"
 summary = "Runs your own repositories' GitHub Actions jobs on this box, one at a time unless you raise the number."
 group = "Development"
-version = "gha-runner-2026.1114.1"
-released = "2026-11-13"
+version = "gha-runner-2026.1114.2"
+released = "2026-11-14"
 # By path, not inline: a box parses inline compose while reading the catalog, and
 # one key it doesn't know (stop_grace_period, on a box older than this app) would
 # refuse the whole file, every other app with it. By path, only this app's install
 # fails. The signature covers the hash.
 compose_path = "apps/gha-runner/compose.yaml"
-compose_sha256 = "18364b20de08ef40aace96795edf2635bf268ef0654e99be884f49bd9d7546dc"
+compose_sha256 = "7d6b2343dbd072921ac6d1bbfe0be48508ceec2aef9723293ec5a269f0d99112"
 # Both services pin one manifest list, in a public repository (§2).
 [[apps.images]]
 service = "broker"
 image = "docker.io/eshork/gha-runner"
-list = "sha256:76d4c6d2e1f7f4fdff9989e89ee9630dafc69f78d5aa2e859aeb8c3e98a7c07e"
-amd64 = "sha256:3299758e28b77df06e16cf9cc2a6b4a5ffe7637b004c87c90cce3e85a3feb607"
-arm64 = "sha256:62572175d1a3129ab5dfca18814eefdcd0114fb955b62e9b7f408a051ca6f8f1"
+list = "sha256:95e2e16af46dad5690a8fc568fad77e8c662942b656d44a0bd75c7df79eeb898"
+amd64 = "sha256:5d54118bbb082a7e1b49ec1ce5c21cdff07f234f53afd32b7b5b2881314719ea"
+arm64 = "sha256:cf8b7435285e12d2c717947a2b5cc469c46a38c79a5cb10dc41cec3c23afa98b"
 [[apps.images]]
 service = "runner"
 image = "docker.io/eshork/gha-runner"
-list = "sha256:76d4c6d2e1f7f4fdff9989e89ee9630dafc69f78d5aa2e859aeb8c3e98a7c07e"
-amd64 = "sha256:3299758e28b77df06e16cf9cc2a6b4a5ffe7637b004c87c90cce3e85a3feb607"
-arm64 = "sha256:62572175d1a3129ab5dfca18814eefdcd0114fb955b62e9b7f408a051ca6f8f1"
+list = "sha256:95e2e16af46dad5690a8fc568fad77e8c662942b656d44a0bd75c7df79eeb898"
+amd64 = "sha256:5d54118bbb082a7e1b49ec1ce5c21cdff07f234f53afd32b7b5b2881314719ea"
+arm64 = "sha256:cf8b7435285e12d2c717947a2b5cc469c46a38c79a5cb10dc41cec3c23afa98b"
 # Several runners at once (§17.2; spec-apps §7.1): the number is the box's, on
 # the app's card. `slot` holds each runner's folder, where its config is handed
 # over and its stop marker goes. A runner ends itself after every job. An older
