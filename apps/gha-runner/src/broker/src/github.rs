@@ -4,6 +4,7 @@
 
 use crate::policy::{Exposure, RunnerSeen, Scope};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::fmt::{self, Write as _};
 use std::io::Write as _;
 use std::process::{Command, Stdio};
@@ -51,6 +52,13 @@ pub trait GitHub: Send + Sync {
     /// # Errors
     /// As [`GitHub::facts`].
     fn runner(&self, scope: &Scope, id: u64) -> Result<RunnerSeen, String>;
+    /// Every runner of the scope, by id, in as few calls as GitHub allows (one
+    /// page of 100 holds most scopes): with more than one instance, the
+    /// broker's one look a round (§17.3). A runner not listed is gone.
+    ///
+    /// # Errors
+    /// As [`GitHub::facts`].
+    fn runners(&self, scope: &Scope) -> Result<BTreeMap<u64, RunnerSeen>, String>;
     /// # Errors
     /// As [`GitHub::facts`]; GitHub refuses while the runner has a job.
     fn remove(&self, scope: &Scope, id: u64) -> Result<(), String>;
@@ -173,6 +181,26 @@ pub fn seen(v: &Value) -> RunnerSeen {
     } else {
         RunnerSeen::Offline
     }
+}
+
+/// A scope with more runners than this is refused rather than read in part:
+/// one of ours missing from a partial list would read as gone.
+const PAGES_AT_MOST: u32 = 10;
+
+/// One page of `GET .../actions/runners`: each runner's id and state, and
+/// whether the page was full (another may follow).
+///
+/// # Errors
+/// A body that doesn't list runners.
+pub fn listed(v: &Value) -> Result<(BTreeMap<u64, RunnerSeen>, bool), String> {
+    let list = v["runners"]
+        .as_array()
+        .ok_or("GitHub's list of runners has no runners in it")?;
+    let got = list
+        .iter()
+        .filter_map(|r| Some((r["id"].as_u64()?, seen(r))))
+        .collect();
+    Ok((got, list.len() >= 100))
 }
 
 impl Curl {
@@ -320,6 +348,32 @@ impl GitHub for Curl {
         })
     }
 
+    fn runners(&self, scope: &Scope) -> Result<BTreeMap<u64, RunnerSeen>, String> {
+        let mut out = BTreeMap::new();
+        for page in 1..=PAGES_AT_MOST {
+            let (code, v) = self.call(
+                "GET",
+                &format!("{}/actions/runners?per_page=100&page={page}", base(scope)),
+                None,
+            )?;
+            if !(200..=299).contains(&code) {
+                return Err(format!(
+                    "GitHub answered {code} listing the runners: {}",
+                    scrub(v["message"].as_str().unwrap_or("no message"), &self.token)
+                ));
+            }
+            let (got, full) = listed(&v)?;
+            out.extend(got);
+            if !full {
+                return Ok(out);
+            }
+        }
+        Err(format!(
+            "GitHub lists more than {} runners in this scope",
+            PAGES_AT_MOST * 100
+        ))
+    }
+
     fn runner(&self, scope: &Scope, id: u64) -> Result<RunnerSeen, String> {
         let (code, v) = self.call(
             "GET",
@@ -380,6 +434,19 @@ mod tests {
     use serde_json::json;
     use std::io::{BufRead as _, BufReader, Read as _};
     use std::net::TcpListener;
+
+    #[test]
+    fn a_page_of_runners_gives_each_ones_state_and_whether_more_may_follow() {
+        let v: Value = serde_json::from_str(
+            r#"{"total_count":2,"runners":[{"id":5,"status":"online","busy":true},{"id":6,"status":"offline","busy":false}]}"#,
+        )
+        .unwrap();
+        let (got, full) = listed(&v).unwrap();
+        assert_eq!(got[&5], RunnerSeen::Busy);
+        assert_eq!(got[&6], RunnerSeen::Offline);
+        assert!(!full);
+        assert!(listed(&serde_json::json!({"message": "Not Found"})).is_err());
+    }
 
     /// A one-shot fake GitHub on loopback: real curl, a real socket. Answers
     /// `status` with `body` and gives back the request it read.

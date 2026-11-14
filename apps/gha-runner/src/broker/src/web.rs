@@ -309,6 +309,12 @@ async fn home(State(page): App, headers: HeaderMap) -> Response {
 /// The warning (§13.4), in one sentence since the broker can't tell which kind
 /// of image the runner service has.
 const UPDATE_SOON: &str = "Update this app soon from Apps on your LehrNAS. If you use your own runner image, rebuild it from this app's new version, then update it there.";
+/// §17.1's exposure, the same words as the entry's `help` beside the card's
+/// number (the box allows 200 characters there).
+pub const TOGETHER: &str = "Jobs running together can read each other's files in /cache, /dev/shm and shares, and share localhost, so fixed ports clash. Use more than one only for repositories that trust each other.";
+/// §17.8.
+const PUBLIC_ONE: &str =
+    "This repository is public, so this app runs one job at a time, whatever the setting says.";
 /// The runner never spoke and GitHub never saw it (§13.2).
 const NO_WORD: &str = "No word from the runner service in 5 minutes, so it may not have started. If you chose your own image for it, check that it's built from this app's image.";
 
@@ -342,6 +348,13 @@ fn sentence(
             "GitHub isn't answering about this runner; trying again.".to_owned()
         }
         Some(Waiting::Idle) => format!("Idle: waiting for a job from {label}."),
+        Some(Waiting::Leaving) => "Leaving: the number on the app's card was lowered.".to_owned(),
+        Some(Waiting::OneAtATime) => {
+            "Not taking jobs: one at a time for a public repository.".to_owned()
+        }
+        Some(Waiting::ClearingCache) => {
+            "Waiting for the other jobs to end, then the cache empties.".to_owned()
+        }
         Some(Waiting::Running) => {
             let c = current.cloned().unwrap_or_default();
             let mins = c.busy_since.map_or(0, |b| now.saturating_sub(b) / 60);
@@ -392,6 +405,34 @@ fn version_section(
     }
 }
 
+/// §17.2: how many, the warning, and a row per runner.
+fn runners_section(
+    b: &mut String,
+    state: &crate::state::State,
+    view: &crate::engine::View,
+    count: u32,
+    label: &str,
+    now: u64,
+) {
+    let _ = write!(
+        b,
+        "<p>Runners at once: {count}. To change this, open this app under Apps on your LehrNAS.</p><p class=warn>{}</p>",
+        esc(TOGETHER)
+    );
+    if view.public {
+        let _ = write!(b, "<p class=warn>{}</p>", esc(PUBLIC_ONE));
+    }
+    b.push_str("<table><tr><th>Runner</th><th>State</th></tr>");
+    for (n, w) in &view.instances {
+        let _ = write!(
+            b,
+            "<tr><td>{n}</td><td>{}</td></tr>",
+            esc(&sentence(Some(w), state.runners.get(n), label, now))
+        );
+    }
+    b.push_str("</table>");
+}
+
 fn status_body(page: &Page) -> String {
     let now = clock::now();
     let (state, view) = {
@@ -403,16 +444,21 @@ fn status_body(page: &Page) -> String {
         .as_ref()
         .map_or_else(|_| "nowhere yet".to_owned(), Scope::label);
     let mut b = String::new();
+    let count = view.layout.as_ref().map_or(1, |l| l.count);
+    let many = count > 1 || state.runners.keys().any(|n| *n > 1);
     let _ = write!(
         b,
         "<p><strong>{}</strong></p>",
         esc(&sentence(
             view.waiting.as_ref(),
-            state.current.as_ref(),
+            state.runners.get(&1),
             &label,
             now
         ))
     );
+    if many {
+        runners_section(&mut b, &state, &view, count, &label, now);
+    }
     if let Some(n) = view.queued.filter(|n| *n > 0) {
         let _ = write!(
             b,
@@ -424,7 +470,11 @@ fn status_body(page: &Page) -> String {
         b.push_str("<p>Drain is on: the current job finishes, and no new one starts.</p>");
     }
     if state.clear_cache {
-        b.push_str("<p>The cache empties when the current job ends.</p>");
+        b.push_str(if many {
+            "<p>The cache empties when every running job has ended. No new job starts until then.</p>"
+        } else {
+            "<p>The cache empties when the current job ends.</p>"
+        });
     }
     if let Some(Waiting::Refused(r)) = &view.waiting {
         let _ = write!(b, "<div class=warn><p>{}</p>", esc(&r.sentence));
@@ -455,11 +505,20 @@ fn status_body(page: &Page) -> String {
     if state.jobs.is_empty() {
         b.push_str("<p>None yet.</p>");
     } else {
-        b.push_str("<table><tr><th>Job</th><th>Repository</th><th>Took</th><th>Result</th><th>Ended</th></tr>");
+        let runner_head = if many { "<th>Runner</th>" } else { "" };
+        let _ = write!(
+            b,
+            "<table><tr><th>Job</th>{runner_head}<th>Repository</th><th>Took</th><th>Result</th><th>Ended</th></tr>"
+        );
         for j in &state.jobs {
+            let runner_cell = if many {
+                format!("<td>{}</td>", j.instance)
+            } else {
+                String::new()
+            };
             let _ = write!(
                 b,
-                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{} ago</td></tr>",
+                "<tr><td>{}</td>{runner_cell}<td>{}</td><td>{}</td><td>{}</td><td>{} ago</td></tr>",
                 esc(&j.name),
                 esc(&j.repository),
                 clock::span(j.finished.saturating_sub(j.started)),
@@ -494,12 +553,27 @@ async fn status_json(State(page): App, headers: HeaderMap) -> Response {
         Some(Waiting::Unknown) => "unknown",
         Some(Waiting::Idle) => "idle",
         Some(Waiting::Running) => "running",
+        Some(Waiting::Leaving) => "leaving",
+        Some(Waiting::OneAtATime) => "one at a time",
+        Some(Waiting::ClearingCache) => "clearing the cache",
     };
+    let instances: Vec<_> = view
+        .instances
+        .keys()
+        .map(|n| {
+            serde_json::json!({
+                "n": n,
+                "job": state.runners.get(n).and_then(|c| c.job.clone()),
+            })
+        })
+        .collect();
     axum::Json(serde_json::json!({
         "state": phase,
         "drain": state.drain,
         "version": state.runner_version,
-        "job": state.current.and_then(|c| c.job),
+        "job": state.runners.get(&1).and_then(|c| c.job.clone()),
+        "count": view.layout.as_ref().map_or(1, |l| l.count),
+        "instances": instances,
     }))
     .into_response()
 }
@@ -772,5 +846,57 @@ mod tests {
         assert!(!home.to_lowercase().contains("lehrnas-"), "{home}");
         assert!(!home.contains("`lehrnas`"), "{home}");
         assert!(!home.contains("label"), "{home}");
+    }
+
+    #[tokio::test]
+    async fn with_one_runner_the_page_reads_as_before() {
+        let p = page("one", None);
+        let c = signed(&p).await;
+        p.shared.lock().1.layout = Some(crate::slots::Layout::parse(r#"{"count": 1}"#));
+        let (_, _, home) = send(&p, "GET", "/", "", Some(&c)).await;
+        assert!(!home.contains("Runners at once"), "{home}");
+        assert!(!home.contains("<th>Runner</th>"), "{home}");
+    }
+
+    #[tokio::test]
+    async fn with_several_the_page_says_how_many_warns_and_has_a_row_and_a_column_each() {
+        let p = page("many", None);
+        let c = signed(&p).await;
+        {
+            let mut g = p.shared.lock();
+            g.1.layout = Some(crate::slots::Layout::parse(r#"{"count": 2}"#));
+            g.1.instances.insert(1, Waiting::Idle);
+            g.1.instances.insert(2, Waiting::Running);
+            g.0.runners.insert(
+                2,
+                crate::state::Runner {
+                    job: Some("build".into()),
+                    ..crate::state::Runner::default()
+                },
+            );
+            g.0.push_job(crate::state::Job {
+                name: "web".into(),
+                instance: 2,
+                ..crate::state::Job::default()
+            });
+        }
+        let (_, _, home) = send(&p, "GET", "/", "", Some(&c)).await;
+        assert!(
+            home.contains(
+                "Runners at once: 2. To change this, open this app under Apps on your LehrNAS."
+            ),
+            "{home}"
+        );
+        assert!(home.contains(&esc(TOGETHER)), "{home}");
+        assert!(home.contains("Running a job: build"), "{home}");
+        assert!(home.contains("<th>Runner</th>"), "{home}");
+        assert!(!home.contains(PUBLIC_ONE), "{home}");
+        p.shared.lock().1.public = true;
+        let (_, _, home) = send(&p, "GET", "/", "", Some(&c)).await;
+        assert!(home.contains(PUBLIC_ONE), "{home}");
+        let (_, _, json) = send(&p, "GET", "/status.json", "", Some(&c)).await;
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["count"], 2);
+        assert_eq!(v["instances"][1]["job"], "build");
     }
 }

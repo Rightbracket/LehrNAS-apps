@@ -213,8 +213,10 @@ pub struct Current {
     pub stop_already_asked: bool,
 }
 
-/// One round's inputs.
+/// One round's inputs, for one instance (§17.3). Each flag is a separate
+/// fact the admin or the box sets, so they stay plain fields.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct Round {
     pub set_up: bool,
     pub drain: bool,
@@ -222,6 +224,12 @@ pub struct Round {
     pub gate: Gate,
     pub current: Option<Current>,
     pub job_limit_secs: u64,
+    /// The box lowered the number past this instance, or marked it leaving:
+    /// its runner leaves after its job, and no new one registers.
+    pub leaving: bool,
+    /// A public repository runs one job at a time: this is an instance above
+    /// the first (§17.8).
+    pub one_at_a_time: bool,
 }
 
 /// One round's decision.
@@ -251,6 +259,12 @@ pub enum Waiting {
     Running,
     /// GitHub couldn't be asked about the runner.
     Unknown,
+    /// This instance is leaving (§17.3): nothing registers for it.
+    Leaving,
+    /// A public repository, and this instance isn't the first (§17.8).
+    OneAtATime,
+    /// *Clear cache* or the cap waits for every runner to finish (§17.5).
+    ClearingCache,
 }
 
 /// The one rule of §3: the next config only after GitHub shows the previous
@@ -263,6 +277,12 @@ pub fn decide(r: &Round) -> Step {
             Step::Wait(Waiting::NoPassword)
         } else if r.drain {
             Step::Wait(Waiting::Drained)
+        } else if r.leaving {
+            Step::Wait(Waiting::Leaving)
+        } else if r.one_at_a_time && r.gate == Gate::Open {
+            Step::Wait(Waiting::OneAtATime)
+        } else if r.clear_cache {
+            Step::Wait(Waiting::ClearingCache)
         } else {
             match &r.gate {
                 Gate::Open => Step::Register,
@@ -271,7 +291,12 @@ pub fn decide(r: &Round) -> Step {
             }
         };
     };
-    let leave = !r.set_up || r.drain || r.clear_cache || matches!(r.gate, Gate::Refused(_));
+    let leave = !r.set_up
+        || r.drain
+        || r.clear_cache
+        || r.leaving
+        || r.one_at_a_time
+        || matches!(r.gate, Gate::Refused(_));
     match c.seen {
         None => Step::Wait(Waiting::Unknown),
         Some(RunnerSeen::Gone) => Step::Forget,
@@ -456,6 +481,8 @@ mod tests {
             gate: Gate::Open,
             current: None,
             job_limit_secs: 6 * 3600,
+            leaving: false,
+            one_at_a_time: false,
         }
     }
 
@@ -600,6 +627,52 @@ mod tests {
         let c = Some("me/thing".to_owned());
         assert_eq!(confirmation_kept(&Exposure::Public, c.clone()), c);
         assert_eq!(confirmation_kept(&Exposure::Closed, c), None);
+    }
+
+    #[test]
+    fn a_leaving_instance_lets_its_job_finish_and_registers_nothing_after() {
+        let leaving = |r: Round| Round { leaving: true, ..r };
+        assert_eq!(decide(&leaving(with(RunnerSeen::Idle))), Step::Remove);
+        assert_eq!(
+            decide(&leaving(with(RunnerSeen::Busy))),
+            Step::Wait(Waiting::Running),
+            "a busy job is never lost"
+        );
+        assert_eq!(decide(&leaving(with(RunnerSeen::Gone))), Step::Forget);
+        assert_eq!(decide(&leaving(round())), Step::Wait(Waiting::Leaving));
+    }
+
+    #[test]
+    fn a_public_repository_opens_only_the_first_instance() {
+        let above = |r: Round| Round {
+            one_at_a_time: true,
+            ..r
+        };
+        assert_eq!(decide(&above(round())), Step::Wait(Waiting::OneAtATime));
+        assert_eq!(decide(&above(with(RunnerSeen::Idle))), Step::Remove);
+        assert_eq!(
+            decide(&above(with(RunnerSeen::Busy))),
+            Step::Wait(Waiting::Running)
+        );
+        // Refused outright, the refusal says more than the one-at-a-time line.
+        assert!(matches!(
+            decide(&Round {
+                gate: refusal(),
+                ..above(round())
+            }),
+            Step::Wait(Waiting::Refused(_))
+        ));
+    }
+
+    #[test]
+    fn a_pending_cache_clear_registers_nothing_until_it_has_run() {
+        assert_eq!(
+            decide(&Round {
+                clear_cache: true,
+                ..round()
+            }),
+            Step::Wait(Waiting::ClearingCache)
+        );
     }
 
     #[test]

@@ -7,6 +7,8 @@
 # config only after the last runner is gone. Then the runner's report and the two
 # kinds of own image (§13.2): one built FROM a stand-in for the app's image takes a
 # job, and one that isn't says so on the page after the wait, about six minutes.
+# Last, two instances (§17): each takes its own config from its own socket, and
+# neither can reach the other's folder or see its /tmp.
 #   apps/gha-runner/tests/pod-check.sh [path to a linux gha-runner-broker]
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
@@ -16,8 +18,8 @@ bin=${1:-$here/src/broker/target/$triple/release/gha-runner-broker}
 n=gha-pod-check-$$
 t=$(mktemp -d)
 cleanup() {
-  docker rm -f "$n-broker" "$n-runner" >/dev/null 2>&1 || true
-  docker volume rm "$n-cache" "$n-config" >/dev/null 2>&1 || true
+  docker rm -f "$n-broker" "$n-runner" "$n-runner1" "$n-runner2" >/dev/null 2>&1 || true
+  docker volume rm "$n-cache" "$n-config" "$n-slot" >/dev/null 2>&1 || true
   docker rmi -f "$n-app" "$n-own" >/dev/null 2>&1 || true
   rm -rf "$t"
 }
@@ -30,6 +32,13 @@ cat > /dev/null
 for a in "$@"; do url=$a; done
 m=GET; prev=; for a in "$@"; do [ "$prev" = --request ] && m=$a; prev=$a; done
 case "$m $url" in
+  "GET "*/actions/runners\?*)
+    # The one list a round, with several instances: every runner issued and not gone.
+    st=online; [ -e /cache/github-sees-it-offline ] && st=offline
+    l=; for f in /cache/issued-*; do [ -e "$f" ] || continue; id=${f##*-}
+      [ -e "/cache/gone-$id" ] && continue
+      l="$l${l:+,}{\"id\":$id,\"status\":\"$st\",\"busy\":false}"; done
+    printf '{"runners":[%s]}\n200' "$l" ;;
   "GET "*/actions/runners/*)
     id=${url##*/}
     if [ -e "/cache/gone-$id" ]; then printf '{}\n404'
@@ -63,7 +72,11 @@ id=$(sed -E 's/.*"agentId":([0-9]+).*/\1/' "$RUNNER_STATE_DIR/.runner")
   [ -e /tmp/left-by-the-last-job ] && echo "LEFTOVER in tmp"
   [ -e /usr/local/bin/a-tool-the-admin-added ] && echo "own image's tool"
   ls -A /dev/shm | grep -v '^$' | sed 's/^/shm has: /'
+  [ -e /slots ] && echo "SEES every slot"
+  ls -A /slot | sed 's/^/slot has: /'
+  ls -A /tmp | grep '^mine-' | sed 's/^/tmp has: /'
 } >> "/cache/report-$id"
+touch "/tmp/mine-$id"
 touch /tmp/left-by-the-last-job /dev/shm/left-by-job
 touch /dev/mqueue/left 2>/dev/null || true
 ipcmk -M 4096 > /dev/null 2>&1 || true
@@ -82,13 +95,14 @@ cp "$bin" "$t/broker"; chmod +x "$t/broker"
 
 docker volume create "$n-cache" >/dev/null
 docker volume create "$n-config" >/dev/null
-docker run --rm -v "$n-cache:/c" -v "$n-config:/d" "$base" chown 1001:1001 /c /d
+docker volume create "$n-slot" >/dev/null
+docker run --rm -v "$n-cache:/c" -v "$n-config:/d" -v "$n-slot:/s" "$base" chown 1001:1001 /c /d /s
 
 # --tmpfs: what podman's ReadOnlyTmpfs gives each service on the box.
 common=(--read-only --tmpfs /tmp:exec,mode=1777 --tmpfs /run --user 1001:1001 --security-opt no-new-privileges --cap-drop ALL)
 docker run -d --name "$n-broker" "${common[@]}" --ipc shareable -p 127.0.0.1::8711 \
   -e GITHUB_TOKEN=s3cret-token -e RUNNER_SCOPE=me/thing -e PATH=/fake:/usr/bin:/bin \
-  -v "$n-config:/config" -v "$n-cache:/cache" -v "$t/curl:/fake/curl:ro" \
+  -v "$n-config:/config" -v "$n-cache:/cache" -v "$n-slot:/slots" -v "$t/curl:/fake/curl:ro" \
   -v "$t/broker:/usr/local/bin/gha-runner-broker:ro" -v "$here/image/start.sh:/s/start.sh:ro" \
   -v "$t/release-app:/usr/local/lib/gha-runner/RELEASE:ro" \
   --entrypoint /bin/bash "$base" /s/start.sh >/dev/null
@@ -98,7 +112,8 @@ start_runner() {
   docker rm -f "$n-runner" >/dev/null 2>&1 || true
   docker run -d --name "$n-runner" "${common[@]}" --ipc "container:$n-broker" --network "container:$n-broker" \
     -e RUNNER_DIR=/fake-runner -e RUNNER_LISTENER=bin/fake-listener -e RUNNER_STATE_DIR=/tmp/runner \
-    -v "$n-cache:/cache" -v "$t/runner:/fake-runner:ro" -v "$here/image/runner-start.sh:/s/runner-start.sh:ro" \
+    -v "$n-cache:/cache" -v "$n-slot:/slot" -v "$t/broker:/usr/local/bin/gha-runner-broker:ro" \
+    -v "$t/runner:/fake-runner:ro" -v "$here/image/runner-start.sh:/s/runner-start.sh:ro" \
     -v "$here/image/start.sh:/usr/local/lib/gha-runner/start.sh:ro" \
     -v "$t/release-older:/usr/local/lib/gha-runner/RELEASE:ro" \
     --entrypoint /bin/bash "$base" -c 'sed "s#/usr/local/lib/gha-runner/runner-start.sh#/s/runner-start.sh#" /usr/local/lib/gha-runner/start.sh > /tmp/s.sh; exec bash /tmp/s.sh' >/dev/null
@@ -130,7 +145,7 @@ for want in "updates off" "no token key" "no token in pid 1"; do
   grep -q "$want" <<<"$r2" || { echo "FAIL: job 2: no '$want'"; exit 1; }
 done
 if grep -q LEFTOVER <<<"$r2"; then echo "FAIL: /tmp survived"; exit 1; fi
-if grep -q 'shm has' <<<"$r2"; then echo "FAIL: /dev/shm survived"; exit 1; fi
+if grep -q 'shm has' <<<"$r2"; then echo "FAIL: /dev/shm survived, or a config went there"; exit 1; fi
 grep -q 'sysv: 1$' <<<"$r2" || { echo "FAIL: SysV memory survived (want only job 2's own)"; exit 1; }
 if docker logs "$n-broker" 2>&1 | grep -q s3cret-token; then echo "FAIL: the token in the log"; exit 1; fi
 home=$(/usr/bin/curl -s -m 5 -b "$t/jar" "http://127.0.0.1:$port/")
@@ -150,8 +165,10 @@ c=$t/ctx; mkdir -p "$c"
 cp "$here/image/start.sh" "$here/image/runner-start.sh" "$c/"
 cp "$t/release-app" "$c/RELEASE"
 cp -R "$t/runner" "$c/runner"
+cp "$t/broker" "$c/gha-runner-broker"
 cat > "$c/Dockerfile" <<F
 FROM $base
+COPY gha-runner-broker /usr/local/bin/
 COPY start.sh runner-start.sh RELEASE /usr/local/lib/gha-runner/
 COPY runner /opt/runner
 RUN chmod 0755 /usr/local/lib/gha-runner/start.sh /usr/local/lib/gha-runner/runner-start.sh
@@ -170,7 +187,7 @@ docker build -q -t "$n-own" "$c" >/dev/null
 run_image() {
   docker rm -f "$n-runner" >/dev/null 2>&1 || true
   docker run -d --name "$n-runner" "${common[@]}" --ipc "container:$n-broker" --network "container:$n-broker" \
-    -e RUNNER_LISTENER=bin/fake-listener -e RUNNER_STATE_DIR=/tmp/runner -v "$n-cache:/cache" "$@" >/dev/null
+    -e RUNNER_LISTENER=bin/fake-listener -e RUNNER_STATE_DIR=/tmp/runner -v "$n-cache:/cache" -v "$n-slot:/slot" "$@" >/dev/null
 }
 run_image "$n-own"
 wait_for gone-3
@@ -190,4 +207,33 @@ for _ in $(seq 1 400); do
   sleep 1
 done
 [ -n "$said" ] || { page_in; docker logs "$n-broker" 2>&1 | tail -20; echo "FAIL: the page never said it heard nothing"; exit 1; }
-echo "OK | pod check | jobs: hand-off, updates off, no token in the runner, IPC clean, report, own image, silent image"
+
+# Two instances, as the box runs them (spec-apps §7.1): the list at the top of
+# `slot`, and each instance mounting only its own folder of it.
+docker rm -f "$n-runner" >/dev/null 2>&1 || true
+in_cache 'rm -f /cache/github-sees-it-offline; touch /cache/gone-4'
+docker run --rm -v "$n-slot:/s" --user 1001:1001 "$base" sh -c \
+  'mkdir -p /s/1 /s/2 && printf "{\"count\": 2, \"leaving\": []}" > /s/.instances.new && mv /s/.instances.new /s/.instances'
+start_instance() {
+  docker rm -f "$n-runner$1" >/dev/null 2>&1 || true
+  docker run -d --name "$n-runner$1" "${common[@]}" --ipc "container:$n-broker" --network "container:$n-broker" \
+    -e LEHR_INSTANCE="$1" -e RUNNER_DIR=/fake-runner -e RUNNER_LISTENER=bin/fake-listener -e RUNNER_STATE_DIR=/tmp/runner \
+    -v "$n-cache:/cache" --mount "type=volume,src=$n-slot,dst=/slot,volume-subpath=$1" \
+    -v "$t/broker:/usr/local/bin/gha-runner-broker:ro" -v "$t/runner:/fake-runner:ro" \
+    -v "$here/image/runner-start.sh:/s/runner-start.sh:ro" -v "$here/image/start.sh:/usr/local/lib/gha-runner/start.sh:ro" \
+    -v "$t/release-older:/usr/local/lib/gha-runner/RELEASE:ro" \
+    --entrypoint /bin/bash "$base" -c 'sed "s#/usr/local/lib/gha-runner/runner-start.sh#/s/runner-start.sh#" /usr/local/lib/gha-runner/start.sh > /tmp/s.sh; exec bash /tmp/s.sh' >/dev/null
+}
+start_instance 1
+start_instance 2
+wait_for gone-5
+wait_for gone-6
+for id in 5 6; do
+  r=$(in_cache "cat /cache/report-$id"); echo "--- instance job $id"; echo "$r"
+  if grep -q 'SEES every slot' <<<"$r"; then echo "FAIL: job $id sees every instance's folder"; exit 1; fi
+  if grep -q 'slot has: socket' <<<"$r"; then echo "FAIL: job $id could reach a config socket"; exit 1; fi
+  if grep -q "tmp has: mine-" <<<"$r"; then echo "FAIL: job $id sees another job's /tmp"; exit 1; fi
+  grep -q "updates off" <<<"$r" || { echo "FAIL: instance job $id: no config"; exit 1; }
+done
+docker logs "$n-broker" 2>&1 | grep -q 'on instance 2' || { docker logs "$n-broker" 2>&1 | tail; echo "FAIL: nothing registered on instance 2"; exit 1; }
+echo "OK | pod check | jobs: hand-off, updates off, no token in the runner, IPC clean, report, own image, silent image, two instances apart"

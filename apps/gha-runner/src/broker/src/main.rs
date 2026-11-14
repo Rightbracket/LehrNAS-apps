@@ -8,6 +8,7 @@ mod github;
 mod jit;
 mod pod;
 mod policy;
+mod slots;
 mod state;
 mod web;
 
@@ -126,6 +127,9 @@ impl GitHub for NoGitHub {
     fn runner(&self, _: &Scope, _: u64) -> Result<RunnerSeen, String> {
         Err(self.0.clone())
     }
+    fn runners(&self, _: &Scope) -> Result<std::collections::BTreeMap<u64, RunnerSeen>, String> {
+        Err(self.0.clone())
+    }
     fn remove(&self, _: &Scope, _: u64) -> Result<(), String> {
         Err(self.0.clone())
     }
@@ -152,6 +156,20 @@ fn connect(s: &Settings) -> Arc<dyn GitHub> {
 
 #[tokio::main]
 async fn main() {
+    // The runner's start: `take <socket> <dir>`, its config from the broker
+    // (§17.3). It reads no setting and no token.
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("take") {
+        let (Some(socket), Some(dir)) = (args.get(2), args.get(3)) else {
+            eprintln!("usage: gha-runner-broker take <socket> <dir>");
+            std::process::exit(2);
+        };
+        if let Err(e) = slots::take(Path::new(socket), Path::new(dir)) {
+            eprintln!("take: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if let Err(e) = run().await {
         println!("FAULT | gha-runner | the broker stopped: {e}");
         std::process::exit(1);

@@ -1,7 +1,8 @@
 # Runner for GitHub Actions
 
 An app for a LehrNAS box: a self-hosted GitHub Actions runner for your own
-repositories, one job at a time, on a box that is usually idle. The design is
+repositories, one job at a time unless you raise the number, on a box that is
+usually idle. The design is
 `docs/spec-runner-app.md` in the LehrNAS repository.
 
 | Path | What it is |
@@ -16,13 +17,14 @@ repositories, one job at a time, on a box that is usually idle. The design is
 
 ## How it works
 
-- **`broker`** holds `GITHUB_TOKEN`. It asks GitHub for one just-in-time config,
-  sets `disableUpdate` in it, and writes its three files into `/dev/shm`. The next
-  config comes only after GitHub shows the previous runner gone, and the pod's IPC
-  is emptied first.
-- **`runner`** has no token. Its start takes those files into its own tmpfs, runs
-  one job and exits. The container goes with it, so the next one starts clean. Only
-  `/cache` survives.
+- **`broker`** holds `GITHUB_TOKEN`. It asks GitHub for one just-in-time config per
+  runner, sets `disableUpdate` in it, and offers its three files on a socket in that
+  runner's folder of the `slot` volume, in memory only; the socket goes once they're
+  taken. A runner's next config comes only after GitHub shows its previous runner
+  gone, and the pod's IPC is emptied first while no job is running.
+- **`runner`** has no token. Its start takes those files into its own tmpfs with the
+  broker's binary (`gha-runner-broker take`), runs one job and exits. The container
+  goes with it, so the next one starts clean. Only `/cache` survives.
 - **The page,** on port 8711, shows the state, the runner's version and its days left,
   and the last 50 jobs, with *Drain*, *Resume* and *Clear cache*. The first visit
   sets its password, and no job runs before then, because a job shares the pod's
@@ -31,6 +33,27 @@ repositories, one job at a time, on a box that is usually idle. The design is
   port after it takes its config: the runner's version, and the release its image
   was built from (the `RELEASE` file beside the start scripts). A job can send these
   too, so they only ever fill the page.
+
+## Several runners at once
+
+The number is the box's, on this app's card under Apps (*Instances* and
+*Change…*). The page shows it and a row per runner, and doesn't set it.
+
+- **Jobs running together share more.** They can read each other's files in
+  `/cache`, `/dev/shm` and any share this app has, and they share `localhost`, so
+  tests that use a fixed port clash. Use more than one only for repositories that
+  trust each other.
+- **Memory is the app's,** so each runner's `mem_limit` adds up: the card gives the
+  sum. A job past the limit may get a neighbour's process killed.
+- **Caches:** cargo, npm and uv lock their own and are shared. rustup, the tool
+  cache, pip, Playwright and `XDG_CACHE_HOME` aren't safe to share, so each runner
+  above the first has its own under `/cache/slot<n>/`. The 20 GiB cap is for all of
+  `/cache`. *Clear cache* waits until no job is running, and no runner starts a job
+  until then.
+- **A public repository runs one job at a time,** whatever the number.
+- **Lowering the number** never ends a running job: that runner finishes, then
+  leaves.
+- **An older box** ignores the setting and runs one runner.
 
 ## Settings
 

@@ -1,6 +1,8 @@
 # The runner app's compose (docs/spec-runner-app.md §2 in LehrNAS). One image, both
 # services; the service with the token's key is the broker. `cache` is the only
-# disk a job writes (§5), and the workspace is in RAM (read_only: true). 60 s is a
+# disk a job writes (§5), and the workspace is in RAM (read_only: true). `slot`
+# holds no data: each runner's folder, where the broker offers its config on a
+# socket (§17.3); the broker mounts them all at /slots. 60 s is a
 # job's time to end at a stop (§9.4). The release writes the tag and the entry's hash.
 services:
   broker:
@@ -15,6 +17,7 @@ services:
     volumes:
       - config:/config
       - cache:/cache
+      - slot:/slots
   runner:
     image: docker.io/eshork/gha-runner:gha-runner-2026.1106.3
     read_only: true
@@ -23,6 +26,8 @@ services:
     stop_grace_period: 60s
     volumes:
       - cache:/cache
+      - slot:/slot
 volumes:
   config:
   cache:
+  slot:

@@ -1,19 +1,15 @@
-//! What the broker does to its pod (§3, §6): the IPC the services share, the
-//! files of one JIT config, and `cache`. It only ever writes and deletes in the
-//! shared places: nothing a job could have left there is read.
+//! What the broker does to its pod (§3, §6, §17.3): the IPC the services
+//! share, each instance's config and stop marker in the `slot` volume, and
+//! `cache`. It only ever writes and deletes in the shared places: nothing a job
+//! could have left there is read.
 
 use crate::policy::{self, Grant};
+use crate::slots::{Layout, Slots};
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Write as _;
-use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, OpenOptionsExt as _};
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-/// Where the runner's start looks; it appears whole, by a rename.
-pub const JIT_DIR: &str = "gha-runner-jit";
-/// Written to ask the runner's start to stop its listener.
-pub const STOP_FILE: &str = "gha-runner-stop";
 
 /// The seam the tests fake.
 pub trait Pod: Send + Sync {
@@ -22,16 +18,21 @@ pub trait Pod: Send + Sync {
     /// # Errors
     /// Something of the last job couldn't be removed.
     fn clean(&self) -> Result<(), String>;
-    /// One config's files, mode 0600, for the runner's start to take.
+    /// The instances the box runs (§17.3), read fresh.
+    fn layout(&self) -> Layout;
+    /// One config's files for instance `n`'s start to take, over its socket
+    /// (§17.3): in memory only, and gone once taken.
     ///
     /// # Errors
-    /// The tmpfs's.
-    fn write_config(&self, files: &BTreeMap<String, Vec<u8>>) -> Result<(), String>;
-    /// Ask the runner to stop its listener.
+    /// The socket's.
+    fn write_config(&self, n: u32, files: &BTreeMap<String, Vec<u8>>) -> Result<(), String>;
+    /// Instance `n`'s waiting config, if any, is dropped (its runner left).
+    fn withdraw(&self, n: u32);
+    /// Ask instance `n`'s runner to stop its listener.
     ///
     /// # Errors
-    /// The tmpfs's.
-    fn stop_runner(&self) -> Result<(), String>;
+    /// The volume's.
+    fn stop_runner(&self, n: u32) -> Result<(), String>;
     fn cache_bytes(&self) -> u64;
     /// # Errors
     /// Something in `cache` couldn't be removed.
@@ -44,6 +45,7 @@ pub struct RealPod {
     pub shm: PathBuf,
     pub mqueue: PathBuf,
     pub cache: PathBuf,
+    pub slots: Slots,
     pub mountinfo: PathBuf,
     /// `ipcrm`: a parameter so a test can run on any machine.
     pub ipcrm: Vec<String>,
@@ -56,6 +58,7 @@ impl RealPod {
             shm: "/dev/shm".into(),
             mqueue: "/dev/mqueue".into(),
             cache: "/cache".into(),
+            slots: Slots::new("/slots"),
             mountinfo: "/proc/self/mountinfo".into(),
             ipcrm: vec!["ipcrm".into(), "-a".into()],
         }
@@ -117,25 +120,22 @@ impl Pod for RealPod {
         }
     }
 
-    fn write_config(&self, files: &BTreeMap<String, Vec<u8>>) -> Result<(), String> {
-        let tmp = self.shm.join(format!("{JIT_DIR}.new"));
-        let write = || -> std::io::Result<()> {
-            fs::DirBuilder::new().mode(0o700).create(&tmp)?;
-            for (name, body) in files {
-                let mut f = fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .mode(0o600)
-                    .open(tmp.join(name))?;
-                f.write_all(body)?;
-            }
-            fs::rename(&tmp, self.shm.join(JIT_DIR))
-        };
-        write().map_err(|e| format!("the JIT config couldn't be written: {e}"))
+    fn layout(&self) -> Layout {
+        self.slots.layout()
     }
 
-    fn stop_runner(&self) -> Result<(), String> {
-        fs::write(self.shm.join(STOP_FILE), "stop\n").map_err(|e| e.to_string())
+    fn write_config(&self, n: u32, files: &BTreeMap<String, Vec<u8>>) -> Result<(), String> {
+        self.slots
+            .offer(n, files.clone())
+            .map_err(|e| format!("the JIT config couldn't be offered: {e}"))
+    }
+
+    fn withdraw(&self, n: u32) {
+        self.slots.withdraw(n);
+    }
+
+    fn stop_runner(&self, n: u32) -> Result<(), String> {
+        self.slots.stop(n)
     }
 
     fn cache_bytes(&self) -> u64 {
@@ -163,12 +163,12 @@ impl Pod for RealPod {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::{PermissionsExt as _, symlink};
+    use std::os::unix::fs::symlink;
 
     fn pod(name: &str) -> (RealPod, PathBuf) {
         let d = std::env::temp_dir().join(format!("gha-pod-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
-        for s in ["shm", "mq", "cache"] {
+        for s in ["shm", "mq", "cache", "slots"] {
             fs::create_dir_all(d.join(s)).unwrap();
         }
         (
@@ -176,6 +176,7 @@ mod tests {
                 shm: d.join("shm"),
                 mqueue: d.join("mq"),
                 cache: d.join("cache"),
+                slots: Slots::new(d.join("slots")),
                 mountinfo: d.join("mountinfo"),
                 ipcrm: vec!["true".into()],
             },
@@ -210,32 +211,17 @@ mod tests {
     }
 
     #[test]
-    fn a_config_appears_whole_private_and_leaves_nothing_else() {
-        let (p, _) = pod("write");
-        let files = BTreeMap::from([
-            (".runner".to_owned(), b"{}".to_vec()),
-            (".credentials".to_owned(), b"c".to_vec()),
-        ]);
-        p.write_config(&files).unwrap();
-        let at = p.shm.join(JIT_DIR);
-        assert_eq!(fs::read(at.join(".credentials")).unwrap(), b"c");
-        assert_eq!(
-            fs::metadata(&at).unwrap().permissions().mode() & 0o777,
-            0o700
-        );
-        assert_eq!(
-            fs::metadata(at.join(".runner"))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o600
-        );
+    fn a_config_goes_on_the_instances_socket_never_into_shared_memory() {
+        let (p, d) = pod("write");
+        let files = BTreeMap::from([(".credentials".to_owned(), b"c".to_vec())]);
+        p.write_config(1, &files).unwrap();
+        assert!(d.join("slots").join(crate::slots::SOCKET).exists());
         assert_eq!(
             fs::read_dir(&p.shm).unwrap().count(),
-            1,
-            "no temporary left"
+            0,
+            "nothing in /dev/shm"
         );
+        p.withdraw(1);
     }
 
     #[test]

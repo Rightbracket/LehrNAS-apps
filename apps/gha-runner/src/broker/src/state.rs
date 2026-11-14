@@ -3,6 +3,7 @@
 //! the environment (§3).
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -18,6 +19,13 @@ pub struct Job {
     pub started: u64,
     pub finished: u64,
     pub result: String,
+    /// The instance it ran on (§17.2); a job saved before instances is 1's.
+    #[serde(default = "first")]
+    pub instance: u32,
+}
+
+const fn first() -> u32 {
+    1
 }
 
 /// The runner registered now.
@@ -63,6 +71,13 @@ pub struct State {
     pub drain: bool,
     #[serde(default)]
     pub clear_cache: bool,
+    /// The runner registered now, per instance (§17.3). A state saved before
+    /// instances had one `current`: [`File::load`] reads it as instance 1's,
+    /// and [`File::save`] writes instance 1's there too, so a rollback to that
+    /// release still knows its runner.
+    #[serde(default)]
+    pub runners: BTreeMap<u32, Runner>,
+    /// Instance 1's runner, for an older release only: read it through `runners`.
     #[serde(default)]
     pub current: Option<Runner>,
     #[serde(default)]
@@ -82,6 +97,16 @@ pub struct State {
 }
 
 impl State {
+    /// A state saved by a release before instances: its one runner is
+    /// instance 1's.
+    #[must_use]
+    pub fn upgraded(mut self) -> Self {
+        if let Some(c) = self.current.take() {
+            self.runners.entry(1).or_insert(c);
+        }
+        self
+    }
+
     /// A finished job, the newest first, the list capped.
     pub fn push_job(&mut self, job: Job) {
         self.jobs.insert(0, job);
@@ -99,7 +124,8 @@ impl File {
         Self(dir.join("state.json"))
     }
 
-    /// The saved state; none yet is an empty one. A file that can't be read is
+    /// The saved state; none yet is an empty one. A saved `current` becomes
+    /// instance 1's runner. A file that can't be read is
     /// an error, not a fresh start: that would forget the registered runner and
     /// the password.
     ///
@@ -107,7 +133,9 @@ impl File {
     /// The file is there and unreadable.
     pub fn load(&self) -> Result<State, String> {
         match fs::read(&self.0) {
-            Ok(b) => serde_json::from_slice(&b).map_err(|e| format!("{}: {e}", self.0.display())),
+            Ok(b) => serde_json::from_slice::<State>(&b)
+                .map(State::upgraded)
+                .map_err(|e| format!("{}: {e}", self.0.display())),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(State::default()),
             Err(e) => Err(format!("{}: {e}", self.0.display())),
         }
@@ -119,9 +147,11 @@ impl File {
     /// The disk's.
     pub fn save(&self, s: &State) -> Result<(), String> {
         let tmp = self.0.with_extension("json.new");
+        let mut s = s.clone();
+        s.current = s.runners.get(&1).cloned();
         let write = || -> std::io::Result<()> {
             let mut f = fs::File::create(&tmp)?;
-            f.write_all(&serde_json::to_vec_pretty(s)?)?;
+            f.write_all(&serde_json::to_vec_pretty(&s)?)?;
             f.sync_all()?;
             fs::rename(&tmp, &self.0)
         };
@@ -151,6 +181,29 @@ mod tests {
             ..State::default()
         };
         f.save(&s).unwrap();
+        assert_eq!(f.load().unwrap(), s);
+    }
+
+    #[test]
+    fn a_saved_current_reads_as_instance_one_and_instance_one_is_still_written_there() {
+        let d = dir("upgrade");
+        fs::write(
+            d.join("state.json"),
+            r#"{"current":{"id":9,"name":"lehrnas-1","written":5},"jobs":[{"name":"j","repository":"a/b","started":1,"finished":2,"result":"Succeeded"}]}"#,
+        )
+        .unwrap();
+        let f = File::new(&d);
+        let s = f.load().unwrap();
+        assert_eq!(s.runners[&1].id, 9);
+        assert_eq!(s.jobs[0].instance, 1, "an old job ran on instance 1");
+        f.save(&s).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_slice(&fs::read(d.join("state.json")).unwrap()).unwrap();
+        assert_eq!(
+            v["current"]["id"], 9,
+            "an older release reads its runner here"
+        );
+        assert_eq!(v["runners"]["1"]["id"], 9);
         assert_eq!(f.load().unwrap(), s);
     }
 

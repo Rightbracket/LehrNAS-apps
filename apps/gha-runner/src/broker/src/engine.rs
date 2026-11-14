@@ -1,16 +1,20 @@
-//! One round at a time: read what GitHub and the pod say, let `policy` decide,
-//! do it. The rounds run on their own thread; the page shares [`Shared`].
+//! One round at a time: read what GitHub and the pod say, let `policy` decide
+//! for each instance, do it. The rounds run on their own thread; the page
+//! shares [`Shared`].
 
 use crate::github::GitHub;
 use crate::jit;
 use crate::pod::Pod;
 use crate::policy::{self, Current, Gate, Round, RunnerSeen, Said, Scope, Step, Waiting};
+use crate::slots::Layout;
 use crate::state::{File, Job, Runner, State};
+use std::collections::BTreeMap;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
 /// How often the broker looks when nothing is happening: visibility and the
-/// runner, about 240 calls an hour against GitHub's 5,000.
+/// runners, about 240 calls an hour against GitHub's 5,000, however many
+/// instances run (§17.3).
 pub const ROUND_SECS: u64 = 30;
 /// A step that changes something looks again soon.
 pub const SOON_SECS: u64 = 3;
@@ -19,13 +23,20 @@ const RELEASES_EVERY_SECS: u64 = 86_400;
 /// What the page shows beyond the saved state.
 #[derive(Clone, Debug, Default)]
 pub struct View {
+    /// The first instance's, the page's headline.
     pub waiting: Option<Waiting>,
+    /// Every instance's, for its row (§17.2).
+    pub instances: BTreeMap<u32, Waiting>,
+    /// What the box said it runs, as of the last round.
+    pub layout: Option<Layout>,
+    /// The scope is a public repository (§17.8).
+    pub public: bool,
     /// The last thing that went wrong doing a step, for the page.
     pub fault: Option<String>,
     pub queued: Option<u64>,
-    /// `Runner update in progress` appeared in the runner's output (§8).
+    /// `Runner update in progress` appeared in a runner's output (§8).
     pub update_seen: bool,
-    /// GitHub shows the runner offline and it never reported (§13.2).
+    /// GitHub shows a runner offline and it never reported (§13.2).
     pub no_word: bool,
 }
 
@@ -34,6 +45,16 @@ pub struct Shared {
     inner: Mutex<(State, View)>,
     wake: Condvar,
     file: File,
+}
+
+/// `@3 Running job: x`: the instance a line came from. A line with no number
+/// is the first's, as an older runner image sends it.
+#[must_use]
+pub fn from_instance(line: &str) -> (u32, &str) {
+    line.strip_prefix('@')
+        .and_then(|r| r.split_once(' '))
+        .and_then(|(n, rest)| Some((n.parse().ok().filter(|n| *n >= 1)?, rest)))
+        .unwrap_or((1, line))
 }
 
 impl Shared {
@@ -78,9 +99,11 @@ impl Shared {
         );
     }
 
-    /// A line of the runner's output reached the broker. Display only: a job
-    /// can send these too, so no decision rests on one.
+    /// A line of a runner's output reached the broker. Display only: a job
+    /// can send these too, for its own instance or a neighbour's, so no
+    /// decision rests on one.
     pub fn heard(&self, line: &str) {
+        let (n, line) = from_instance(line);
         let Some(said) = policy::said(line) else {
             return;
         };
@@ -88,12 +111,12 @@ impl Shared {
         match said {
             Said::UpdateInProgress => g.1.update_seen = true,
             Said::Started(job) => {
-                if let Some(c) = g.0.current.as_mut() {
+                if let Some(c) = g.0.runners.get_mut(&n) {
                     c.job = Some(job);
                 }
             }
             Said::Finished { job, result } => {
-                if let Some(c) = g.0.current.as_mut() {
+                if let Some(c) = g.0.runners.get_mut(&n) {
                     c.job.get_or_insert(job);
                     c.result = Some(result);
                 }
@@ -102,7 +125,7 @@ impl Shared {
             // listener starts. So a job can't overwrite it, and a job sending
             // these in a loop can't turn into one disk write after another.
             Said::Report { runner, release } => {
-                let Some(c) = g.0.current.as_mut() else {
+                let Some(c) = g.0.runners.get_mut(&n) else {
                     return;
                 };
                 if c.reported {
@@ -133,18 +156,37 @@ pub struct Engine {
     pub names: Box<dyn Fn() -> String + Send + Sync>,
 }
 
+/// The gate's word for this round.
+struct Verdict {
+    gate: Gate,
+    group: u64,
+    public: bool,
+}
+
+/// GitHub's look this round: one call per runner with one instance (today's
+/// steps, call for call, §17.10), one list for them all with more (§17.3).
+enum Look {
+    Each,
+    All(Option<BTreeMap<u64, RunnerSeen>>),
+}
+
 impl Engine {
     /// The gate for this round, with the group to register in. Read fresh every
     /// round: "before every job" for a runner that may sit idle for days means
     /// while it sits (§7).
-    fn gate(&self) -> (Gate, u64) {
+    fn gate(&self) -> Verdict {
+        let closed = |gate| Verdict {
+            gate,
+            group: 0,
+            public: false,
+        };
         let scope = match &self.scope {
             Ok(s) => s,
-            Err(e) => return (Gate::Unreadable(e.clone()), 0),
+            Err(e) => return closed(Gate::Unreadable(e.clone())),
         };
         let facts = match self.github.facts(scope) {
             Ok(f) => f,
-            Err(e) => return (Gate::Unreadable(e), 0),
+            Err(e) => return closed(Gate::Unreadable(e)),
         };
         let confirmed = {
             let mut g = self.shared.lock();
@@ -153,16 +195,17 @@ impl Engine {
             if kept != was {
                 g.0.confirmed.clone_from(&kept);
                 if let Err(e) = self.shared.file.save(&g.0) {
-                    return (Gate::Unreadable(e), 0);
+                    return closed(Gate::Unreadable(e));
                 }
             }
             kept
         };
+        let public = facts.exposure == policy::Exposure::Public;
         // The fork setting matters only once the name is confirmed.
-        let fork = if facts.exposure == policy::Exposure::Public && confirmed.is_some() {
+        let fork = if public && confirmed.is_some() {
             match self.github.fork_approval(scope) {
                 Ok(f) => Some(f),
-                Err(e) => return (Gate::Unreadable(e), 0),
+                Err(e) => return closed(Gate::Unreadable(e)),
             }
         } else {
             None
@@ -175,31 +218,35 @@ impl Engine {
             fork.as_deref(),
             &grants,
         );
-        (
-            verdict.map_or_else(Gate::Refused, |()| Gate::Open),
-            facts.group_id,
-        )
+        Verdict {
+            gate: verdict.map_or_else(Gate::Refused, |()| Gate::Open),
+            group: facts.group_id,
+            public,
+        }
     }
 
-    /// The runner as GitHub has it. `None` when GitHub can't be asked.
-    fn observe(&self, now: u64) -> Option<Current> {
+    /// Instance `n`'s runner as GitHub has it. `None` when it has none.
+    fn observe(&self, n: u32, now: u64, look: &Look) -> Option<Current> {
         let (id, written, stop_asked) = {
             let g = self.shared.lock();
-            let c = g.0.current.as_ref()?;
+            let c = g.0.runners.get(&n)?;
             (c.id, c.written, c.stop_asked)
         };
-        let seen = match &self.scope {
-            Ok(s) => self.github.runner(s, id).ok(),
-            Err(_) => None,
+        let seen = match (look, &self.scope) {
+            (_, Err(_)) | (Look::All(None), _) => None,
+            (Look::Each, Ok(s)) => self.github.runner(s, id).ok(),
+            (Look::All(Some(all)), Ok(_)) => {
+                Some(all.get(&id).copied().unwrap_or(RunnerSeen::Gone))
+            }
         };
         let busy_since = {
             let mut g = self.shared.lock();
-            let c = g.0.current.as_mut()?;
+            let c = g.0.runners.get_mut(&n)?;
             if seen == Some(RunnerSeen::Busy) && c.busy_since.is_none() {
                 c.busy_since = Some(now);
                 let _ = self.shared.file.save(&g.0);
             }
-            g.0.current.as_ref()?.busy_since
+            g.0.runners.get(&n)?.busy_since
         };
         Some(Current {
             seen,
@@ -223,47 +270,139 @@ impl Engine {
         }
     }
 
-    /// One round. Answers the step and how long to sleep.
+    /// One round, answering the first instance's step and how long to sleep.
     pub fn round(&self, now: u64) -> (Step, u64) {
+        let (steps, sleep) = self.steps(now);
+        let first = steps
+            .into_values()
+            .next()
+            .unwrap_or(Step::Wait(Waiting::Unknown));
+        (first, sleep)
+    }
+
+    /// One round: every instance's step, and how long to sleep.
+    pub fn steps(&self, now: u64) -> (BTreeMap<u32, Step>, u64) {
         self.refresh_releases(now);
-        let (gate, group) = self.gate();
-        let no_word;
-        let current = self.observe(now);
-        let round = {
+        let layout = self.pod.layout();
+        let verdict = self.gate();
+        let (registered, clear_asked) = {
             let g = self.shared.lock();
-            let reported = g.0.current.as_ref().is_some_and(|c| c.reported);
-            no_word = current.as_ref().and_then(|c| policy::no_word(c, reported));
-            Round {
-                set_up: g.0.password_hash.is_some(),
-                drain: g.0.drain,
-                clear_cache: g.0.clear_cache,
-                gate,
-                current,
-                job_limit_secs: self.job_limit_secs,
-            }
+            (
+                g.0.runners.keys().copied().collect::<Vec<_>>(),
+                g.0.clear_cache,
+            )
         };
-        let step = policy::decide(&round);
-        let result = self.act(&step, group, now);
+        // *Clear cache* asked with no runner registered: nothing to wait for.
+        let mut fault = None;
+        if clear_asked && registered.is_empty() {
+            fault = self.clear_cache().err();
+        }
+        let many = layout.count > 1 || registered.iter().any(|n| *n > 1);
+        let look = if many {
+            Look::All(
+                self.scope
+                    .as_ref()
+                    .ok()
+                    .and_then(|s| self.github.runners(s).ok()),
+            )
+        } else {
+            Look::Each
+        };
+        let instances = layout.instances(registered);
+        let seen: BTreeMap<u32, Option<Current>> = instances
+            .iter()
+            .map(|n| (*n, self.observe(*n, now, &look)))
+            .collect();
+        let busy = |n: u32| {
+            seen.get(&n)
+                .copied()
+                .flatten()
+                .is_some_and(|c| c.seen == Some(RunnerSeen::Busy))
+        };
+        let mut no_word = None;
+        let mut steps = BTreeMap::new();
+        for n in instances {
+            let current = seen.get(&n).copied().flatten();
+            let round = {
+                let g = self.shared.lock();
+                let reported = g.0.runners.get(&n).is_some_and(|c| c.reported);
+                if let Some(said) = current.as_ref().and_then(|c| policy::no_word(c, reported)) {
+                    no_word = Some(no_word.unwrap_or(false) || said);
+                }
+                Round {
+                    set_up: g.0.password_hash.is_some(),
+                    drain: g.0.drain,
+                    clear_cache: g.0.clear_cache,
+                    gate: verdict.gate.clone(),
+                    current,
+                    job_limit_secs: self.job_limit_secs,
+                    leaving: layout.leaving(n),
+                    one_at_a_time: verdict.public && n > 1,
+                }
+            };
+            let step = policy::decide(&round);
+            let others_busy = seen.keys().any(|m| *m != n && busy(*m));
+            if let Err(e) = self.act(n, &step, verdict.group, now, others_busy) {
+                fault.get_or_insert(e);
+            }
+            steps.insert(n, step);
+        }
         let queued = self.scope.as_ref().ok().and_then(|s| self.github.queued(s));
+        self.record(&steps, layout, verdict.public, queued, no_word, fault);
+        let sleep = if steps.values().all(|s| matches!(s, Step::Wait(_))) {
+            ROUND_SECS
+        } else {
+            SOON_SECS
+        };
+        (steps, sleep)
+    }
+
+    /// What the page and the log learn from a round.
+    fn record(
+        &self,
+        steps: &BTreeMap<u32, Step>,
+        layout: Layout,
+        public: bool,
+        queued: Option<u64>,
+        no_word: Option<bool>,
+        fault: Option<String>,
+    ) {
         let mut g = self.shared.lock();
         g.1.queued = queued;
+        g.1.layout = Some(layout);
+        g.1.public = public;
         if let Some(said) = no_word {
             g.1.no_word = said;
         }
         // With no runner wanted, there's none to be silent.
-        if matches!(
-            step,
-            Step::Wait(
-                Waiting::NoPassword
-                    | Waiting::Drained
-                    | Waiting::Refused(_)
-                    | Waiting::Unreadable(_)
+        let none_wanted = |s: &Step| {
+            matches!(
+                s,
+                Step::Wait(
+                    Waiting::NoPassword
+                        | Waiting::Drained
+                        | Waiting::Refused(_)
+                        | Waiting::Unreadable(_)
+                )
             )
-        ) {
+        };
+        if steps.values().all(none_wanted) {
             g.1.no_word = false;
         }
-        let waiting = match &step {
-            Step::Wait(w) => Some(w.clone()),
+        let mut rows = BTreeMap::new();
+        for (n, step) in steps {
+            let was = g.1.instances.get(n).cloned();
+            let now = match step {
+                Step::Wait(w) => Some(w.clone()),
+                _ => was,
+            };
+            if let Some(w) = now {
+                rows.insert(*n, w);
+            }
+        }
+        g.1.instances = rows;
+        let waiting = match steps.values().next() {
+            Some(Step::Wait(w)) => Some(w.clone()),
             _ => g.1.waiting.clone(),
         };
         // One log line per change, in the alerts' form. Never a value of the
@@ -277,44 +416,40 @@ impl Engine {
             }
         }
         g.1.waiting = waiting;
-        let fault = result.err();
         if let Some(f) = &fault
             && g.1.fault.as_ref() != Some(f)
         {
             println!("FAULT | gha-runner | {f}");
         }
         g.1.fault = fault;
-        drop(g);
-        let sleep = if matches!(step, Step::Wait(_)) {
-            ROUND_SECS
-        } else {
-            SOON_SECS
-        };
-        (step, sleep)
     }
 
-    fn act(&self, step: &Step, group: u64, now: u64) -> Result<(), String> {
+    fn act(
+        &self,
+        n: u32,
+        step: &Step,
+        group: u64,
+        now: u64,
+        others_busy: bool,
+    ) -> Result<(), String> {
         match step {
             Step::Wait(_) => Ok(()),
-            Step::Register => self.register(group, now),
-            Step::Forget => self.forget(now),
+            Step::Register => self.register(n, group, now, others_busy),
+            Step::Forget => self.forget(n, now, others_busy),
             Step::Remove => {
                 let (scope, id) = {
                     let g = self.shared.lock();
-                    (
-                        self.scope.clone()?,
-                        g.0.current.as_ref().map_or(0, |c| c.id),
-                    )
+                    (self.scope.clone()?, g.0.runners.get(&n).map_or(0, |c| c.id))
                 };
                 self.github.remove(&scope, id)?;
                 // Its listener has no reason left to run, and one still
                 // retrying would never take the next config.
-                self.pod.stop_runner()
+                self.pod.stop_runner(n)
             }
             Step::StopJob => {
-                self.pod.stop_runner()?;
+                self.pod.stop_runner(n)?;
                 self.shared.change(|s| {
-                    if let Some(c) = s.current.as_mut() {
+                    if let Some(c) = s.runners.get_mut(&n) {
                         c.stop_asked = true;
                         c.result = Some("Stopped: past its time limit".into());
                     }
@@ -325,49 +460,75 @@ impl Engine {
 
     /// §3's order: the runner goes in the state first, so a crash here can't
     /// lose track of a registration; the pod is cleaned; only then the files.
-    fn register(&self, group: u64, now: u64) -> Result<(), String> {
+    /// With a neighbour's job running, the IPC isn't emptied under it (§17.4).
+    fn register(&self, n: u32, group: u64, now: u64, others_busy: bool) -> Result<(), String> {
         let scope = self.scope.clone()?;
         let name = (self.names)();
         let reg = self.github.register(&scope, group, &name, &self.labels)?;
         self.shared.change(|s| {
-            s.current = Some(Runner {
-                id: reg.id,
-                name: reg.name.clone(),
-                written: now,
-                ..Runner::default()
-            });
+            s.runners.insert(
+                n,
+                Runner {
+                    id: reg.id,
+                    name: reg.name.clone(),
+                    written: now,
+                    ..Runner::default()
+                },
+            );
         })?;
         self.shared.lock().1.update_seen = false;
         let files = jit::files(&reg.encoded)?;
-        self.pod.clean()?;
-        self.pod.write_config(&files)?;
+        if !others_busy {
+            self.pod.clean()?;
+        }
+        self.pod.write_config(n, &files)?;
+        let on = if n > 1 {
+            format!(" on instance {n}")
+        } else {
+            String::new()
+        };
         println!(
-            "RUNNER | gha-runner | registered {name} ({}) for {}",
+            "RUNNER | gha-runner | registered {name} ({}) for {}{on}",
             reg.id,
             scope.label()
         );
         Ok(())
     }
 
-    /// GitHub shows it gone: record the job, clean up, and free the slot. The
-    /// slot is freed last, so a failed clean is tried again before any new
-    /// config is written.
-    fn forget(&self, now: u64) -> Result<(), String> {
-        self.pod.clean()?;
-        let (asked, repository) = {
+    /// Empty `cache` and give up the request.
+    fn clear_cache(&self) -> Result<(), String> {
+        self.pod.clear_cache()?;
+        self.shared.change(|s| s.clear_cache = false)
+    }
+
+    /// GitHub shows instance `n`'s runner gone: record the job, clean up, and
+    /// free the slot. The slot is freed last, so a failed clean is tried
+    /// again before any new config is written. The cache empties only when no
+    /// other runner is registered; until then the request stands, and no
+    /// instance registers (§17.5).
+    fn forget(&self, n: u32, now: u64, others_busy: bool) -> Result<(), String> {
+        self.pod.withdraw(n);
+        if !others_busy {
+            self.pod.clean()?;
+        }
+        let (asked, others, repository) = {
             let g = self.shared.lock();
             let repository = self
                 .scope
                 .as_ref()
                 .map_or_else(|_| String::new(), Scope::label);
-            (g.0.clear_cache, repository)
+            let others = g.0.runners.keys().any(|m| *m != n);
+            (g.0.clear_cache, others, repository)
         };
-        if policy::empty_cache(asked, self.pod.cache_bytes()) {
+        let empty = policy::empty_cache(asked, self.pod.cache_bytes());
+        if empty && !others {
             self.pod.clear_cache()?;
         }
         self.shared.change(|s| {
-            s.clear_cache = false;
-            let Some(c) = s.current.take() else { return };
+            s.clear_cache = empty && others;
+            let Some(c) = s.runners.remove(&n) else {
+                return;
+            };
             if let Some(started) = c.busy_since.or(c.job.as_ref().map(|_| c.written)) {
                 s.push_job(Job {
                     name: c.job.unwrap_or_else(|| "A job".to_owned()),
@@ -375,6 +536,7 @@ impl Engine {
                     started,
                     finished: now,
                     result: c.result.unwrap_or_else(|| "Unknown".to_owned()),
+                    instance: n,
                 });
             }
         })
@@ -407,6 +569,8 @@ mod tests {
         calls: Mutex<Vec<String>>,
         next_id: Mutex<u64>,
         refuse_remove: Mutex<bool>,
+        /// One runner's state, over `seen` (with several instances).
+        by_id: Mutex<BTreeMap<u64, RunnerSeen>>,
     }
 
     impl GitHub for FakeHub {
@@ -447,7 +611,23 @@ mod tests {
         }
         fn runner(&self, _: &Scope, id: u64) -> Result<RunnerSeen, String> {
             self.calls.lock().unwrap().push(format!("runner {id}"));
+            if let Some(s) = self.by_id.lock().unwrap().get(&id) {
+                return Ok(*s);
+            }
             (*self.seen.lock().unwrap()).ok_or_else(|| "down".to_owned())
+        }
+        fn runners(&self, _: &Scope) -> Result<BTreeMap<u64, RunnerSeen>, String> {
+            self.calls.lock().unwrap().push("runners".into());
+            let by_id = self.by_id.lock().unwrap();
+            let seen = *self.seen.lock().unwrap();
+            let ids = 1..=*self.next_id.lock().unwrap();
+            seen.ok_or_else(|| "down".to_owned())?;
+            Ok(ids
+                .filter_map(|id| {
+                    let s = by_id.get(&id).copied().or(seen)?;
+                    (s != RunnerSeen::Gone).then_some((id, s))
+                })
+                .collect())
         }
         fn remove(&self, _: &Scope, id: u64) -> Result<(), String> {
             self.calls.lock().unwrap().push(format!("remove {id}"));
@@ -455,6 +635,7 @@ mod tests {
                 return Err("GitHub answered 422".into());
             }
             *self.seen.lock().unwrap() = Some(RunnerSeen::Gone);
+            self.by_id.lock().unwrap().insert(id, RunnerSeen::Gone);
             Ok(())
         }
         fn releases(&self) -> Result<Vec<(String, u64)>, String> {
@@ -473,6 +654,7 @@ mod tests {
         grants: Mutex<Vec<Grant>>,
         cache: Mutex<u64>,
         fail_clean: Mutex<bool>,
+        layout: Mutex<Layout>,
     }
 
     impl Pod for FakePod {
@@ -483,13 +665,27 @@ mod tests {
             self.log.lock().unwrap().push("clean".into());
             Ok(())
         }
-        fn write_config(&self, f: &BTreeMap<String, Vec<u8>>) -> Result<(), String> {
-            self.log.lock().unwrap().push("write".into());
+        fn layout(&self) -> Layout {
+            self.layout.lock().unwrap().clone()
+        }
+        fn write_config(&self, n: u32, f: &BTreeMap<String, Vec<u8>>) -> Result<(), String> {
+            let w = if n == 1 {
+                "write".to_owned()
+            } else {
+                format!("write {n}")
+            };
+            self.log.lock().unwrap().push(w);
             self.written.lock().unwrap().push(f.clone());
             Ok(())
         }
-        fn stop_runner(&self) -> Result<(), String> {
-            self.log.lock().unwrap().push("stop".into());
+        fn withdraw(&self, _: u32) {}
+        fn stop_runner(&self, n: u32) -> Result<(), String> {
+            let w = if n == 1 {
+                "stop".to_owned()
+            } else {
+                format!("stop {n}")
+            };
+            self.log.lock().unwrap().push(w);
             Ok(())
         }
         fn cache_bytes(&self) -> u64 {
@@ -757,11 +953,11 @@ mod tests {
         t.e.round(100);
         let saved = t.e.shared.file.load().unwrap();
         assert!(
-            saved.current.is_some(),
+            saved.runners.contains_key(&1),
             "saved before the files were written"
         );
         let t2 = setup("restart2");
-        t2.e.shared.change(|s| s.current = saved.current).unwrap();
+        t2.e.shared.change(|s| s.runners = saved.runners).unwrap();
         *t2.hub.seen.lock().unwrap() = Some(RunnerSeen::Offline);
         assert_eq!(t2.e.round(101).0, Step::Wait(Waiting::Idle));
         assert_eq!(registers(&t2), 0);
@@ -956,5 +1152,240 @@ mod tests {
         t.e.round(RELEASES_EVERY_SECS);
         assert_eq!(t.e.shared.lock().0.releases, [("v9.9.9".to_owned(), 5)]);
         assert_eq!(t.e.shared.lock().0.releases_read, RELEASES_EVERY_SECS);
+    }
+
+    // §17: several instances.
+
+    fn two(name: &str) -> T {
+        let t = setup(name);
+        *t.pod.layout.lock().unwrap() = Layout::parse(r#"{"count": 2}"#);
+        t
+    }
+
+    fn set(t: &T, id: u64, seen: RunnerSeen) {
+        t.hub.by_id.lock().unwrap().insert(id, seen);
+    }
+
+    fn id_of(t: &T, n: u32) -> u64 {
+        t.e.shared.lock().0.runners[&n].id
+    }
+
+    #[test]
+    fn with_one_instance_the_calls_are_todays_one_for_one() {
+        let t = setup("today");
+        t.e.round(100);
+        job_done(&t, 110);
+        let calls = t.hub.calls.lock().unwrap().clone();
+        assert!(!calls.iter().any(|c| c == "runners"), "{calls:?}");
+        assert_eq!(
+            calls,
+            [
+                r#"register lehrnas-test group 7 ["self-hosted"]"#,
+                "runner 1",
+                "runner 1",
+            ]
+        );
+        assert_eq!(*t.pod.log.lock().unwrap(), ["clean", "write", "clean"]);
+    }
+
+    #[test]
+    fn each_instance_gets_its_own_runner_and_its_next_only_after_its_own_is_gone() {
+        let t = two("each");
+        let (steps, _) = t.e.steps(100);
+        assert_eq!(steps[&1], Step::Register);
+        assert_eq!(steps[&2], Step::Register);
+        assert_eq!(registers(&t), 2);
+        let (a, b) = (id_of(&t, 1), id_of(&t, 2));
+        assert_ne!(a, b);
+        set(&t, a, RunnerSeen::Busy);
+        set(&t, b, RunnerSeen::Gone);
+        let (steps, _) = t.e.steps(110);
+        assert_eq!(steps[&1], Step::Wait(Waiting::Running));
+        assert_eq!(steps[&2], Step::Forget);
+        let (steps, _) = t.e.steps(111);
+        assert_eq!(steps[&2], Step::Register, "2 goes on without waiting for 1");
+        assert_eq!(registers(&t), 3);
+        assert!(t.pod.log.lock().unwrap().iter().any(|l| l == "write 2"));
+    }
+
+    #[test]
+    fn with_several_instances_github_is_asked_once_a_round() {
+        let t = two("once");
+        t.e.steps(100);
+        t.hub.calls.lock().unwrap().clear();
+        t.e.steps(110);
+        let calls = t.hub.calls.lock().unwrap().clone();
+        assert_eq!(calls, ["runners"], "one list, no call per runner");
+    }
+
+    #[test]
+    fn the_ipc_is_emptied_only_when_no_job_is_running() {
+        let t = two("ipc");
+        t.e.steps(100);
+        let (a, b) = (id_of(&t, 1), id_of(&t, 2));
+        t.pod.log.lock().unwrap().clear();
+        set(&t, a, RunnerSeen::Busy);
+        set(&t, b, RunnerSeen::Gone);
+        t.e.steps(110);
+        t.e.steps(111);
+        assert!(
+            !t.pod.log.lock().unwrap().iter().any(|l| l == "clean"),
+            "a neighbour's job is running: {:?}",
+            t.pod.log.lock().unwrap()
+        );
+        assert!(t.pod.log.lock().unwrap().iter().any(|l| l == "write 2"));
+        set(&t, a, RunnerSeen::Gone);
+        set(&t, id_of(&t, 2), RunnerSeen::Idle);
+        t.e.steps(120);
+        assert!(t.pod.log.lock().unwrap().iter().any(|l| l == "clean"));
+    }
+
+    #[test]
+    fn a_lowered_number_lets_the_busy_job_finish_and_registers_nothing_there() {
+        let t = two("lower");
+        t.e.steps(100);
+        let b = id_of(&t, 2);
+        set(&t, b, RunnerSeen::Busy);
+        set(&t, id_of(&t, 1), RunnerSeen::Idle);
+        *t.pod.layout.lock().unwrap() = Layout::parse(r#"{"count": 1, "leaving": [2]}"#);
+        let (steps, _) = t.e.steps(110);
+        assert_eq!(
+            steps[&2],
+            Step::Wait(Waiting::Running),
+            "its job is never lost"
+        );
+        set(&t, b, RunnerSeen::Gone);
+        assert_eq!(t.e.steps(120).0[&2], Step::Forget);
+        let (steps, _) = t.e.steps(121);
+        assert!(
+            !steps.contains_key(&2),
+            "it's gone from the rounds: {steps:?}"
+        );
+        assert_eq!(registers(&t), 2);
+        assert_eq!(t.e.shared.lock().0.jobs[0].instance, 2);
+    }
+
+    #[test]
+    fn a_lowered_number_takes_an_idle_runner_off_github_and_stops_it() {
+        let t = two("idle");
+        t.e.steps(100);
+        set(&t, id_of(&t, 2), RunnerSeen::Idle);
+        set(&t, id_of(&t, 1), RunnerSeen::Idle);
+        *t.pod.layout.lock().unwrap() = Layout::parse(r#"{"count": 1, "leaving": [2]}"#);
+        assert_eq!(t.e.steps(110).0[&2], Step::Remove);
+        assert!(t.pod.log.lock().unwrap().iter().any(|l| l == "stop 2"));
+    }
+
+    #[test]
+    fn clear_cache_waits_for_every_job_and_no_instance_registers_meanwhile() {
+        let t = two("clear");
+        t.e.steps(100);
+        let (a, b) = (id_of(&t, 1), id_of(&t, 2));
+        set(&t, a, RunnerSeen::Busy);
+        set(&t, b, RunnerSeen::Idle);
+        t.e.shared.change(|s| s.clear_cache = true).unwrap();
+        let (steps, _) = t.e.steps(110);
+        assert_eq!(steps[&2], Step::Remove, "the idle one leaves");
+        t.e.steps(111);
+        assert_eq!(
+            t.e.steps(112).0[&2],
+            Step::Wait(Waiting::ClearingCache),
+            "and nothing takes its place"
+        );
+        assert!(!t.pod.log.lock().unwrap().iter().any(|l| l == "clear-cache"));
+        set(&t, a, RunnerSeen::Gone);
+        t.pod.log.lock().unwrap().clear();
+        t.e.steps(120);
+        let log = t.pod.log.lock().unwrap().clone();
+        assert!(!t.e.shared.lock().0.clear_cache);
+        let cleared = log
+            .iter()
+            .position(|l| l == "clear-cache")
+            .expect("cleared");
+        let wrote = log
+            .iter()
+            .position(|l| l.starts_with("write"))
+            .expect("then a runner");
+        assert!(cleared < wrote, "{log:?}");
+    }
+
+    #[test]
+    fn the_cap_passed_with_a_neighbour_busy_waits_like_clear_cache() {
+        let t = two("capwait");
+        t.e.steps(100);
+        let (a, b) = (id_of(&t, 1), id_of(&t, 2));
+        *t.pod.cache.lock().unwrap() = policy::CACHE_CAP_BYTES + 1;
+        set(&t, a, RunnerSeen::Busy);
+        set(&t, b, RunnerSeen::Gone);
+        t.e.steps(110);
+        assert!(
+            t.e.shared.lock().0.clear_cache,
+            "asked, for when the other ends"
+        );
+        assert!(!t.pod.log.lock().unwrap().iter().any(|l| l == "clear-cache"));
+    }
+
+    #[test]
+    fn a_public_repository_runs_one_job_at_a_time_whatever_the_number() {
+        let t = two("pub");
+        *t.hub.exposure.lock().unwrap() = Some(Ok(Exposure::Public));
+        *t.hub.fork.lock().unwrap() = STRICTEST_FORK_APPROVAL.into();
+        t.e.shared
+            .change(|s| s.confirmed = Some("me/thing".into()))
+            .unwrap();
+        let (steps, _) = t.e.steps(100);
+        assert_eq!(steps[&1], Step::Register);
+        assert_eq!(steps[&2], Step::Wait(Waiting::OneAtATime));
+        assert_eq!(registers(&t), 1);
+        assert!(t.e.shared.lock().1.public);
+    }
+
+    #[test]
+    fn going_public_sends_an_idle_second_runner_away() {
+        let t = two("turnpub");
+        t.e.steps(100);
+        set(&t, id_of(&t, 1), RunnerSeen::Idle);
+        set(&t, id_of(&t, 2), RunnerSeen::Idle);
+        *t.hub.exposure.lock().unwrap() = Some(Ok(Exposure::Public));
+        *t.hub.fork.lock().unwrap() = STRICTEST_FORK_APPROVAL.into();
+        t.e.shared
+            .change(|s| s.confirmed = Some("me/thing".into()))
+            .unwrap();
+        let (steps, _) = t.e.steps(110);
+        assert_eq!(steps[&2], Step::Remove);
+        assert_eq!(steps[&1], Step::Wait(Waiting::Idle));
+    }
+
+    #[test]
+    fn a_runners_lines_land_on_its_own_instance() {
+        let t = two("lines");
+        t.e.steps(100);
+        t.e.shared
+            .heard("@2 2026-11-05 11:14:31Z: Running job: build");
+        t.e.shared.heard("2026-11-05 11:14:31Z: Running job: web");
+        let g = t.e.shared.lock();
+        assert_eq!(g.0.runners[&2].job.as_deref(), Some("build"));
+        assert_eq!(
+            g.0.runners[&1].job.as_deref(),
+            Some("web"),
+            "no number: the first"
+        );
+        drop(g);
+        assert_eq!(from_instance("@0 x"), (1, "@0 x"), "no instance 0");
+        assert_eq!(from_instance("@12 Job"), (12, "Job"));
+    }
+
+    #[test]
+    fn github_not_listing_leaves_every_instance_waiting_and_registers_nothing() {
+        let t = two("nolist");
+        t.e.steps(100);
+        *t.hub.seen.lock().unwrap() = None;
+        t.hub.by_id.lock().unwrap().clear();
+        let (steps, _) = t.e.steps(110);
+        assert!(
+            steps.values().all(|s| *s == Step::Wait(Waiting::Unknown)),
+            "{steps:?}"
+        );
+        assert_eq!(registers(&t), 2);
     }
 }

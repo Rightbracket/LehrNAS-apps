@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Several runners at once (LehrNAS #332): set the number on this app's card under
+  Apps. One stays the default, and with one, jobs run as before. The page shows the
+  number, a warning about what jobs running together share, a row per runner, and a
+  Runner column in the last jobs. A public repository still runs one job at a time.
+- The broker hands each runner its config on a socket in the new `slot` volume, no
+  longer in `/dev/shm`, and the runner's start takes it with the broker's binary.
+  This changes the contract between the two services again: **an image built from
+  an earlier release won't start with this one, so rebuild your own image from this
+  release first.**
+- Each runner above the first has its own rustup, tool cache, pip, Playwright and
+  XDG caches under `/cache/slot<n>/`; cargo, npm and uv stay shared.
+
 ## gha-runner-2026.1106.3
 
 - There is no default label any more. If your workflows name `lehrnas`, set
