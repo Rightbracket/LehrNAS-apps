@@ -23,6 +23,15 @@ trap 'echo got-TERM; exit 8' TERM
 for _ in $(seq 1 300); do sleep 0.1; [ -e "$RUNNER_STATE_DIR/quit" ] && exit 0; done
 F
 chmod +x "$t/runner/bin/fake"
+# A listener that runs one job and ends as a real just-in-time one does: with 2.
+# FAKE_SAY_DONE=0 leaves out the job's last line (a listener that failed).
+cat > "$t/runner/bin/fake-job" <<'F'
+#!/bin/bash
+echo "2026-11-14 05:20:02Z: Running job: harness"
+[ "${FAKE_SAY_DONE:-1}" = 1 ] && echo "2026-11-14 05:21:46Z: Job harness completed with result: Succeeded"
+exit "${FAKE_EXIT:-2}"
+F
+chmod +x "$t/runner/bin/fake-job"
 # The broker's binary as the start calls it: `take <socket> <dir>`, here from a
 # folder the test fills, the socket going once taken as the real one does.
 cat > "$t/take" <<'F'
@@ -152,10 +161,22 @@ wait "$pid" || true
 rm -f "$t/slot/stop"
 kill "$ear" 2>/dev/null || true
 
+# A finished job's exit 2 is the runner's work ending: 0 to the box (§17.9). With
+# no finished job, or any other status, the listener's status stands.
+ends() {
+  rm -rf "$t/state"; jit "$1"
+  rc=0
+  RUNNER_LISTENER=bin/fake-job bash "$here/image/runner-start.sh" > "$t/out-$1" 2>&1 || rc=$?
+  echo "$rc"
+}
+[ "$(ends job-done)" = 0 ] || { echo "FAIL: a finished job's exit 2 isn't 0"; cat "$t/out-job-done"; exit 1; }
+[ "$(FAKE_SAY_DONE=0 ends no-job)" = 2 ] || { echo "FAIL: exit 2 with no finished job became clean"; exit 1; }
+[ "$(FAKE_EXIT=1 ends other)" = 1 ] || { echo "FAIL: another exit status was changed"; exit 1; }
+
 # The stub's sentence, and the role.
 out=$("$here/image/docker-stub" network create x 2>&1 || true)
 [ "$out" = "This runner has no container support, so \`container:\` and \`services:\` can't run here." ] || { echo "FAIL: stub said: $out"; exit 1; }
 if "$here/image/docker-stub" ps 2>/dev/null; then echo "FAIL: the stub succeeded"; exit 1; fi
 grep -q 'GITHUB_TOKEN+set' "$here/image/start.sh"
 
-echo "OK | runner start | hand-off, version report, signal, stop marker, leaving, second instance, stub"
+echo "OK | runner start | hand-off, version report, signal, stop marker, leaving, second instance, a finished job's exit, stub"

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- A runner that finished its job now exits cleanly. Its listener ends with status 2
+  after every job, and the box counted each one against the runner's restarts, so
+  a few short jobs in a row could stop it with APP STOPPED (LehrNAS #332, §17.9).
+  Rebuild your own image from this release to get the fix.
+
+## gha-runner-2026.1114.1
+
 - Several runners at once (LehrNAS #332): set the number on this app's card under
   Apps. One stays the default, and with one, jobs run as before. The page shows the
   number, a warning about what jobs running together share, a row per runner, and a

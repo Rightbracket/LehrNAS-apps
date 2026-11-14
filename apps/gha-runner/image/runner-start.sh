@@ -66,9 +66,14 @@ export XDG_CACHE_HOME="$OWN/xdg" UV_CACHE_DIR=/cache/uv PIP_CACHE_DIR="$OWN/pip"
 
 # Every line stays in the service's log; the ones the status page wants also go
 # to the broker. A job can send these too: they only ever fill the page.
+# Written when the listener says its job ended (the exit below).
+DONE="$STATE/.job-ended"
 report() {
   while IFS= read -r line; do
     printf '%s\n' "$line"
+    case $line in
+      *' completed with result: '*) : > "$DONE" ;;
+    esac
     case $line in
       *'Running job: '*|*' completed with result: '*|*'Runner update in progress'*)
         printf '%s%s\n' "$TAG" "$line" 2>/dev/null > "/dev/udp/127.0.0.1/$REPORT_PORT"
@@ -104,4 +109,16 @@ while kill -0 "$pid" 2>/dev/null; do
   wait $! 2>/dev/null
 done
 wait "$pid"
-exit $?
+rc=$?
+# A just-in-time runner's listener ends with 2 once its one job is done: every
+# job on the rig did, on 1106.3 and on 1114.1 (2026-11-14). That's its work
+# finishing, not a failure, and the box counts every other exit against this
+# service's restarts (§17.9: five in five minutes stop it). So it's 0 here, and
+# only then. The report reads the listener's last lines a moment after it exits.
+if [ "$rc" = 2 ]; then
+  for _ in 1 2 3 4 5 6; do
+    [ -e "$DONE" ] && exit 0
+    sleep 0.5
+  done
+fi
+exit "$rc"
