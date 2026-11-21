@@ -24,3 +24,5 @@ jobs:
           python3 tools/check.py $files
       - name: every app's entry, filled with placeholder digests
         run: python3 tools/check_template.py
+      - name: the release tool's own tests
+        run: python3 -m unittest discover -s tools -p 'test_*.py'
