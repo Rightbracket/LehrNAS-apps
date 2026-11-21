@@ -587,6 +587,8 @@ def broker_name(app_dir: Path) -> str:
 
 
 def main(argv: list[str]) -> int:
+    if hasattr(sys.stdout, "reconfigure"):  # one line per step, even through tee
+        sys.stdout.reconfigure(line_buffering=True)
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("app", help="the app's folder, apps/<app>")
     p.add_argument("--catalog", required=True, help="the catalog file the entry goes into")
