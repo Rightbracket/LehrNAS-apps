@@ -86,7 +86,8 @@ class Names(unittest.TestCase):
         self.assertEqual(r.next_tag("x-y", tags, day), "x-y-2026.1121.8")
 
     def test_repositories_compare_as_docker_hub_resolves_them(self):
-        for ref in ("eshork/x", "index.docker.io/eshork/x", "DOCKER.IO/eshork/x"):
+        for ref in ("eshork/x", "index.docker.io/eshork/x", "DOCKER.IO/eshork/x",
+                    "index.docker.io:443/eshork/x", "registry-1.docker.io:443/eshork/x"):
             self.assertEqual(r.repository_name(ref), "docker.io/eshork/x")
         self.assertEqual(r.repository_name("ubuntu"), "docker.io/library/ubuntu")
         self.assertEqual(r.repository_name("ghcr.io/a/b"), "ghcr.io/a/b")
@@ -205,19 +206,80 @@ class Entries(unittest.TestCase):
 
 class Keys(unittest.TestCase):
     def test_the_key_must_be_the_catalogs_own(self):
-        self.assertEqual(r.key_refusals("trial.toml", b"T\n", b"T", b"A"), [])
-        got = r.key_refusals("trial.toml", b"X", b"T", b"A")
+        self.assertEqual(r.key_refusals(False, "trial.toml", b"T\n", b"T", b"A"), [])
+        got = r.key_refusals(False, "trial.toml", b"X", b"T", b"A")
         self.assertIn("isn't the key the catalog names", got[0])
 
     def test_the_app_channel_key_signs_official_toml_alone(self):
-        self.assertEqual(r.key_refusals("official.toml", b"A", b"A", b"A"), [])
-        got = "; ".join(r.key_refusals("trial.toml", b"A\n", b"A", b"A"))
+        self.assertEqual(r.key_refusals(True, "official.toml", b"A", b"A", b"A"), [])
+        got = "; ".join(r.key_refusals(False, "trial.toml", b"A\n", b"A", b"A"))
         self.assertIn("signs official.toml alone", got)
 
+    def test_official_toml_takes_no_other_key(self):
+        got = "; ".join(r.key_refusals(True, "official.toml", b"T", b"T", b"A"))
+        self.assertIn("signed with the app-channel key alone", got)
+
+    def test_no_app_channel_pub_to_compare_is_refused(self):
+        got = "; ".join(r.key_refusals(False, "trial.toml", b"T", b"T", None))
+        self.assertIn("no app-channel.pub", got)
+
     def test_an_official_image_goes_into_official_toml_alone(self):
-        self.assertIsNone(r.official_image_refusal("official.toml", "eshork/fileferry", OFFICIAL))
-        self.assertIsNotNone(r.official_image_refusal("trial.toml", "eshork/fileferry", OFFICIAL))
-        self.assertIsNone(r.official_image_refusal("trial.toml", IDENT.image, OFFICIAL))
+        self.assertIsNone(r.official_image_refusal(True, "eshork/fileferry", OFFICIAL))
+        self.assertIsNotNone(r.official_image_refusal(False, "eshork/fileferry", OFFICIAL))
+        self.assertIsNone(r.official_image_refusal(False, IDENT.image, OFFICIAL))
+
+
+class Catalogs(unittest.TestCase):
+    """Which file is official.toml is its resolved path's answer, not its name's."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name).resolve()
+        (self.root / "official.toml").write_text(OFFICIAL)
+        (self.root / "lab").mkdir()
+        (self.root / "lab/official.toml").write_text(OFFICIAL)
+        (self.root / "trial.toml").write_text("x")
+        (self.root / "linked.toml").symlink_to(self.root / "official.toml")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_only_the_roots_official_toml_is_official(self):
+        self.assertTrue(r.is_official(self.root / "official.toml", self.root))
+        self.assertTrue(r.is_official(self.root / "linked.toml", self.root))
+        self.assertFalse(r.is_official(self.root / "lab/official.toml", self.root))
+        self.assertFalse(r.is_official(self.root / "trial.toml", self.root))
+
+    def test_a_catalog_in_a_folder_is_refused(self):
+        got = "; ".join(r.catalog_refusals(self.root / "lab/official.toml", self.root, False))
+        self.assertIn("lives at the repository's root", got)
+        self.assertEqual(r.catalog_refusals(self.root / "trial.toml", self.root, True), [])
+
+    def test_an_identity_never_goes_into_official_toml(self):
+        for name in ("official.toml", "linked.toml"):
+            got = "; ".join(r.catalog_refusals(self.root / name, self.root, True))
+            self.assertIn("never goes into official.toml", got)
+
+
+class Secrets(unittest.TestCase):
+    ENV = {
+        "PATH": "/usr/bin", "HOME": "/h", "SIGNING_KEY": "k", "COSIGN_PASSWORD": "p",
+        "REGISTRY_AUTH_FILE": "/a/config.json", "DOCKER_CONFIG": "/a", "DOCKERHUB_TOKEN": "t",
+        "GITHUB_TOKEN": "g", "COSIGN_ANYTHING": "x",
+    }  # fmt: skip
+
+    def test_the_scrubbed_environment_holds_no_secret(self):
+        self.assertEqual(r.scrubbed_env(self.ENV), {"PATH": "/usr/bin", "HOME": "/h"})
+
+    def test_the_secrets_held_are_named(self):
+        self.assertEqual(r.secrets_held({"PATH": "x", "SIGNING_KEY": "", "COSIGN_PASSWORD": "p"}),
+                         ["COSIGN_PASSWORD"])  # fmt: skip
+
+    def test_next_skips_the_registrys_tags_too(self):
+        day = datetime.date(2026, 11, 22)
+        git = ["gha-runner-trial-2026.1122.1"]
+        hub = ["gha-runner-trial-2026.1122.2", "sha256-ab.sig"]
+        self.assertEqual(r.next_tag("gha-runner-trial", git + hub, day), "gha-runner-trial-2026.1122.3")
 
 
 class Logins(unittest.TestCase):
@@ -287,6 +349,13 @@ class Run(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def commit(self):
+        git = ["git", "-C", str(self.root)]
+        subprocess.run([*git, "add", "-A"], check=True)
+        subprocess.run(
+            [*git, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "y"], check=True
+        )
+
     def run_it(self, *argv):
         import contextlib
         import io
@@ -320,6 +389,62 @@ class Run(unittest.TestCase):
         code, out = self.run_it("apps/gha-runner", "--catalog", "official.toml", "--no-push")
         self.assertEqual(code, 2)
         self.assertIn("uncommitted changes", out)
+
+    def test_a_catalog_named_official_toml_in_a_folder_is_refused(self):
+        (self.root / "trial/official.toml").write_text(OFFICIAL)
+        self.commit()
+        code, out = self.run_it("apps/gha-runner", "--catalog", "trial/official.toml", "--no-push")
+        self.assertEqual(code, 2)
+        self.assertIn("lives at the repository's root", out)
+
+    def test_an_identity_into_official_toml_is_refused(self):
+        code, out = self.run_it(
+            "apps/gha-runner", "--catalog", "official.toml", "--as", "trial/gha-runner.toml",
+            "--no-push",
+        )  # fmt: skip
+        self.assertEqual(code, 2)
+        self.assertIn("never goes into official.toml", out)
+
+    def test_the_build_step_refuses_to_hold_a_secret(self):
+        import os
+
+        os.environ["COSIGN_PASSWORD"] = "p"
+        try:
+            code, out = self.run_it(
+                "apps/gha-runner", "--catalog", "trial.toml", "--as", "trial/gha-runner.toml",
+                "--build-only", "--out", str(self.root / "out"),
+            )  # fmt: skip
+        finally:
+            os.environ.pop("COSIGN_PASSWORD")
+        self.assertEqual(code, 2)
+        self.assertIn("the build step holds secrets (", out)
+        self.assertIn("COSIGN_PASSWORD", out)
+        self.assertNotIn("PLAN", out)
+
+    def test_publishing_needs_the_build_steps_record(self):
+        code, out = self.run_it(
+            "apps/gha-runner", "--catalog", "trial.toml", "--as", "trial/gha-runner.toml",
+            "--from", str(self.root / "nothing"),
+        )  # fmt: skip
+        self.assertEqual(code, 2)
+        self.assertIn("run the build step", out)
+
+    def test_git_runs_without_secrets_or_hooks(self):
+        import os
+
+        hook = self.root / ".git/hooks/pre-commit"
+        hook.write_text("#!/bin/sh\necho \"$SIGNING_KEY\" > leaked\nexit 1\n")
+        hook.chmod(0o755)
+        os.environ["SIGNING_KEY"] = "k"
+        try:
+            (self.root / "f").write_text("x")
+            r._git(self.root, "add", "f")
+            r._git(self.root, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "f")
+            env = r._git(self.root, "var", "GIT_COMMITTER_IDENT")
+        finally:
+            os.environ.pop("SIGNING_KEY")
+        self.assertFalse((self.root / "leaked").exists())
+        self.assertTrue(env)
 
     def test_a_push_without_a_key_is_refused_before_it_builds(self):
         import os
