@@ -207,6 +207,21 @@ class Keys(unittest.TestCase):
         self.assertIsNone(r.official_image_refusal("trial.toml", IDENT.image, OFFICIAL))
 
 
+class Logins(unittest.TestCase):
+    def test_skopeos_login_alone_is_refused_for_cosign(self):
+        why = r.cosign_login_refusal({"auths": {"docker.io": {"auth": "x"}}})
+        self.assertIn("https://index.docker.io/v1/", why)
+        self.assertNotIn('"x"', why)
+
+    def test_cosigns_key_a_store_or_a_helper_will_do(self):
+        for config in (
+            {"auths": {"docker.io": {}, "https://index.docker.io/v1/": {}}},
+            {"credsStore": "desktop"},
+            {"credHelpers": {"index.docker.io": "x"}},
+        ):
+            self.assertIsNone(r.cosign_login_refusal(config), config)
+
+
 class Binaries(unittest.TestCase):
     def test_a_binary_that_names_a_local_folder_is_caught(self):
         with tempfile.TemporaryDirectory() as d:

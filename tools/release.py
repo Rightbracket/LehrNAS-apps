@@ -38,6 +38,10 @@ Its inputs from the environment:
   `env://SIGNING_KEY` and never written to disk, with `COSIGN_PASSWORD`.
 - `REGISTRY_AUTH_FILE`: the registry login, a `config.json` that skopeo reads
   and cosign reads as `$DOCKER_CONFIG`. The build never sees it, or the key.
+  The two look a Docker Hub login up under different keys: skopeo's is
+  `docker.io` (what `skopeo login` writes), cosign's `https://index.docker.io/v1/`
+  (what `cosign login docker.io` writes). A file without cosign's is refused
+  before anything is pushed, so no tag goes up that can't be signed.
 - `BUILDX_BUILDER` (optional): the builder buildx uses.
 
 `--no-push` is a rehearsal: it builds and fills, with no registry and no tag,
@@ -421,6 +425,26 @@ def _env() -> dict[str, str]:
     return env
 
 
+#: The key cosign (go-containerregistry) looks a Docker Hub login up under.
+COSIGN_HUB_KEY = "https://index.docker.io/v1/"
+
+
+def cosign_login_refusal(config: dict) -> str | None:
+    """Why cosign won't find a Docker Hub login in this docker config, or None.
+    Only the keys are read: a value is never looked at or printed."""
+    if config.get("credsStore"):
+        return None
+    helpers = config.get("credHelpers") or {}
+    if COSIGN_HUB_KEY in helpers or "index.docker.io" in helpers:
+        return None
+    if COSIGN_HUB_KEY in (config.get("auths") or {}):
+        return None
+    return (
+        f"cosign finds no Docker Hub login in the auth file: it reads the key {COSIGN_HUB_KEY}, "
+        "which `cosign login docker.io` writes (skopeo's login is under docker.io)"
+    )
+
+
 def _build_env() -> dict[str, str]:
     """buildx's: the account's own docker config, never the login's folder."""
     return {k: v for k, v in os.environ.items() if k not in ("DOCKER_CONFIG", "SIGNING_KEY")}
@@ -502,6 +526,13 @@ def _release(args: argparse.Namespace) -> int:
         )  # fmt: skip
         if r.returncode != 0 or not r.stdout.strip():
             raise Refused("no registry login for docker.io (REGISTRY_AUTH_FILE)")
+        if docker_config := _env().get("DOCKER_CONFIG"):
+            try:
+                config = json.loads((Path(docker_config) / "config.json").read_text())
+            except (OSError, ValueError) as e:
+                raise Refused(f"the auth file can't be read as JSON: {type(e).__name__}") from None
+            if why := cosign_login_refusal(config):
+                raise Refused(why)
     print(f"PLAN | {tag} | {repo} | into {catalog_path.name}")
 
     # 2. the build
