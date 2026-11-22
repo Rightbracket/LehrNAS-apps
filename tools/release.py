@@ -348,19 +348,40 @@ def catalog_key(catalog: str) -> str:
 
 
 def is_official(catalog: Path, root: Path) -> bool:
-    """The repository root's `official.toml`, by resolved path: a file of that
-    name anywhere else, or a link to it, is judged as what it is."""
-    return catalog.resolve() == (root / OFFICIAL).resolve()
+    """The repository root's `official.toml`, as a file: a file of that name
+    anywhere else is judged as what it is, and another name for the same file
+    (a case variant, a hard link) is `official.toml`."""
+    official = root / OFFICIAL
+    try:
+        return catalog.resolve() == official.resolve() or catalog.samefile(official)
+    except OSError:
+        return False
 
 
 def catalog_refusals(catalog: Path, root: Path, identity_given: bool) -> list[str]:
     """Where a catalog may be, and what may go into `official.toml`."""
     out = []
+    if catalog.is_symlink():
+        out.append(f"{catalog}: a catalog is a file, not a link to one")
     if catalog.resolve().parent != root.resolve():
         out.append(f"{catalog}: a catalog lives at the repository's root, beside its key")
     if identity_given and is_official(catalog, root):
         out.append(f"an identity release (--as) never goes into {OFFICIAL}")
     return out
+
+
+def pem_key(pem: bytes) -> bytes:
+    """A public key's bytes, whatever its line ends and wrapping: a PEM file's
+    body decoded, or the file's stripped bytes if it isn't one."""
+    import base64
+    import binascii
+
+    lines = [ln.strip() for ln in pem.replace(b"\r", b"").split(b"\n")]
+    body = b"".join(ln for ln in lines if ln and not ln.startswith(b"-----"))
+    try:
+        return base64.b64decode(body, validate=True) if body else pem.strip()
+    except (binascii.Error, ValueError):
+        return pem.strip()
 
 
 def key_refusals(
@@ -369,14 +390,16 @@ def key_refusals(
     """The signing key against the catalog: its public half must be the file
     the catalog names; the app-channel key signs `official.toml` and
     `official.toml` is signed with nothing else."""
+    derived, named = pem_key(derived), pem_key(named)
+    app_pub = None if app_pub is None else pem_key(app_pub)
     out = []
-    if derived.strip() != named.strip():
+    if derived != named:
         out.append("the signing key's public half isn't the key the catalog names")
     if app_pub is None:
         out.append(f"no {APP_CHANNEL_PUB} at the repository's root to check the key against")
-    elif official and derived.strip() != app_pub.strip():
+    elif official and derived != app_pub:
         out.append(f"{OFFICIAL} is signed with the app-channel key alone")
-    elif not official and derived.strip() == app_pub.strip():
+    elif not official and derived == app_pub:
         out.append(f"the app-channel key signs {OFFICIAL} alone, never {catalog_name}")
     return out
 
@@ -491,10 +514,11 @@ def _tool(name: str) -> str:
 
 
 def _git(root: Path | None, *a: str) -> str:
-    """git with no secret in its environment and no hooks: the workspace and
-    its `.git/hooks` outlive the job on a self-hosted runner."""
+    """git with no secret in its environment, no hooks and no fsmonitor: the
+    workspace and its `.git` outlive the job on a self-hosted runner."""
     where = ["-C", str(root)] if root else []
-    return _sh("git", "-c", "core.hooksPath=/dev/null", *where, *a, env=scrubbed_env()).strip()
+    off = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"]
+    return _sh("git", *off, *where, *a, env=scrubbed_env()).strip()
 
 
 def _skopeo_env() -> dict[str, str]:

@@ -215,6 +215,12 @@ class Keys(unittest.TestCase):
         got = "; ".join(r.key_refusals(False, "trial.toml", b"A\n", b"A", b"A"))
         self.assertIn("signs official.toml alone", got)
 
+    def test_a_reformatted_pem_is_the_same_key(self):
+        pem = b"-----BEGIN PUBLIC KEY-----\nQUJDREVGR0g=\n-----END PUBLIC KEY-----\n"
+        crlf = b"-----BEGIN PUBLIC KEY-----\r\nQUJD\r\nREVGR0g=\r\n-----END PUBLIC KEY-----\r\n"
+        got = "; ".join(r.key_refusals(False, "trial.toml", pem, pem, crlf))
+        self.assertIn("signs official.toml alone", got)
+
     def test_official_toml_takes_no_other_key(self):
         got = "; ".join(r.key_refusals(True, "official.toml", b"T", b"T", b"A"))
         self.assertIn("signed with the app-channel key alone", got)
@@ -247,6 +253,10 @@ class Catalogs(unittest.TestCase):
     def test_only_the_roots_official_toml_is_official(self):
         self.assertTrue(r.is_official(self.root / "official.toml", self.root))
         self.assertTrue(r.is_official(self.root / "linked.toml", self.root))
+        (self.root / "hard.toml").hardlink_to(self.root / "official.toml")
+        self.assertTrue(r.is_official(self.root / "hard.toml", self.root))
+        if (self.root / "OFFICIAL.TOML").exists():  # a case-insensitive file system
+            self.assertTrue(r.is_official(self.root / "OFFICIAL.TOML", self.root))
         self.assertFalse(r.is_official(self.root / "lab/official.toml", self.root))
         self.assertFalse(r.is_official(self.root / "trial.toml", self.root))
 
@@ -254,6 +264,10 @@ class Catalogs(unittest.TestCase):
         got = "; ".join(r.catalog_refusals(self.root / "lab/official.toml", self.root, False))
         self.assertIn("lives at the repository's root", got)
         self.assertEqual(r.catalog_refusals(self.root / "trial.toml", self.root, True), [])
+
+    def test_a_linked_catalog_is_refused(self):
+        got = "; ".join(r.catalog_refusals(self.root / "linked.toml", self.root, False))
+        self.assertIn("a catalog is a file, not a link", got)
 
     def test_an_identity_never_goes_into_official_toml(self):
         for name in ("official.toml", "linked.toml"):
