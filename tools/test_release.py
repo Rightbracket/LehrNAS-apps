@@ -169,6 +169,19 @@ class Entries(unittest.TestCase):
         self.assertEqual(ids, ["fileferry", "gha-runner"])
         self.assertEqual(tomllib.loads(twice)["channel"]["key"], "app-channel.pub")
 
+    def test_an_entrys_comment_is_replaced_with_it_never_copied_again(self):
+        head = '[channel]\nname = "t"\nkey = "trial.pub"\n\n'
+        other = '# Another app.\n[[apps]]\nid = "other"\n\n'
+        mine = '# The trial entry.\n\n[[apps]]\nid = "trial"\nversion = "1"\n'
+        stale = head + other + "# The trial entry.\n\n" * 3 + mine
+        new = '# The trial entry.\n\n[[apps]]\nid = "trial"\nversion = "2"\n'
+        once = r.channel_text(stale, new)
+        self.assertEqual(once.count("# The trial entry."), 1)
+        self.assertEqual(once.count("# Another app."), 1)
+        self.assertEqual(r.channel_text(once, new), once)
+        self.assertEqual([a["id"] for a in tomllib.loads(once)["apps"]], ["other", "trial"])
+        self.assertEqual(tomllib.loads(once)["apps"][1]["version"], "2")
+
     def test_the_catalog_names_its_own_key_file(self):
         self.assertEqual(r.catalog_key(OFFICIAL), "app-channel.pub")
         with self.assertRaises(r.Refused):

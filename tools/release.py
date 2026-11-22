@@ -295,12 +295,30 @@ def entry_text(
     return text
 
 
+def _entry_parts(channel: str) -> tuple[str, list[str]]:
+    """The catalog's head and its entries. An entry is an `[[apps]]` table with
+    the comment block right above it, so a release that replaces the entry
+    replaces its comment too, instead of leaving one more copy behind."""
+    lines = channel.splitlines(keepends=True)
+    starts = []
+    for i, line in enumerate(lines):
+        if line.rstrip("\n") == "[[apps]]":
+            j = i
+            while j > 0 and (lines[j - 1].startswith("#") or not lines[j - 1].strip()):
+                j -= 1
+            while not lines[j].strip():  # the blank lines above it are the gap, not the entry
+                j += 1
+            starts.append(max(j, starts[-1] + 1 if starts else 0))
+    cuts = [*starts, len(lines)]
+    head = "".join(lines[: cuts[0]])
+    return head, ["".join(lines[a:b]) for a, b in zip(cuts, cuts[1:])]
+
+
 def channel_text(channel: str, entry: str) -> str:
     """The catalog with the entry's app replaced (or added at the end): entries
-    are `[[apps]]` tables; the catalog's own table stays."""
+    are `[[apps]]` tables, each with its comment; the catalog's own table stays."""
     app_id = the_app(entry)["id"]
-    parts = re.split(r"(?m)^(?=\[\[apps\]\])", channel)
-    head, apps = parts[0], parts[1:]
+    head, apps = _entry_parts(channel)
     kept = [a for a in apps if not re.search(rf'(?m)^id = "{re.escape(app_id)}"\s*$', a)]
     text = head.rstrip("\n") + "\n\n" + "\n".join(a.rstrip("\n") + "\n" for a in kept)
     text = text.rstrip("\n") + "\n\n" + entry.strip("\n") + "\n"
