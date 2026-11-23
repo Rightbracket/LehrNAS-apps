@@ -1,0 +1,11 @@
+# The build's context is the app's folder (#821): only what the Dockerfile
+# copies, so a local target/ or anything else in the folder stays out.
+*
+!image/start.sh
+!image/runner-start.sh
+!image/docker-stub
+!src/broker/Cargo.toml
+!src/broker/Cargo.lock
+!src/broker/rust-toolchain.toml
+!src/broker/.cargo/config.toml
+!src/broker/src/

@@ -7,8 +7,13 @@ docker and no key. Standard library only:
 from __future__ import annotations
 
 import datetime
+import gzip
+import hashlib
+import io
+import json
 import subprocess
 import sys
+import tarfile
 import tempfile
 import tomllib
 import unittest
@@ -313,26 +318,73 @@ class Logins(unittest.TestCase):
 
 class Binaries(unittest.TestCase):
     def test_a_binary_that_names_a_local_folder_is_caught(self):
+        clean = {"a": b"\x00/src/main.rs\x00"}
+        dirty = {"b": b"\x00/Volumes/X/work/src/main.rs\x00"}
+        root = {"c": b"\x00/opt/ci/work/main.rs\x00"}
+        self.assertEqual(r.local_paths(clean, []), [])
+        self.assertTrue(r.local_paths(dirty, []))
+        self.assertTrue(r.local_paths(root, ["/opt/ci/work"]))
+
+    def test_the_broker_is_read_from_each_architectures_last_layer(self):
         with tempfile.TemporaryDirectory() as d:
-            clean, dirty, root = Path(d, "a"), Path(d, "b"), Path(d, "c")
-            clean.write_bytes(b"\x00/src/main.rs\x00")
-            dirty.write_bytes(b"\x00/Volumes/X/work/src/main.rs\x00")
-            root.write_bytes(b"\x00/opt/ci/work/main.rs\x00")
-            self.assertEqual(r.local_paths([clean], []), [])
-            self.assertTrue(r.local_paths([dirty], []))
-            self.assertTrue(r.local_paths([root], ["/opt/ci/work"]))
+            archive, digests = oci_archive(Path(d), {
+                "amd64": [{"usr/local/bin/b": b"old"}, {"usr/local/bin/b": b"amd"}],
+                "arm64": [{"./usr/local/bin/b": b"arm"}, {"etc/x": b"x"}],
+            })  # fmt: skip
+            got = r.archive_file(archive, digests, "usr/local/bin/b")
+            self.assertEqual(got, {"amd64/b": b"amd", "arm64/b": b"arm"})
+            with self.assertRaises(r.Refused):
+                r.archive_file(archive, digests, "usr/local/bin/none")
 
-    def test_paths_are_remapped_for_cargo(self):
-        flags = r.remap_flags(Path("/h"), Path("/w")).split("\x1f")
-        self.assertIn("--remap-path-prefix=/w=/src", flags)
-        self.assertIn("--remap-path-prefix=/h/.cargo=/cargo", flags)
-
-    def test_the_build_has_no_attestations_and_carries_the_tag(self):
-        cmd = r.build_command("t-2026.1121.1", Path("/o.tar"), Path("/ctx"), "b")
+    def test_the_build_is_the_apps_folder_with_its_dockerfile(self):
+        cmd = r.build_command("t-2026.1121.1", Path("/o.tar"), Path("/app"), "b")
         self.assertEqual(cmd[:5], ["docker", "buildx", "build", "--builder", "b"])
-        for want in ("--provenance=false", "--sbom=false", "APP_RELEASE=t-2026.1121.1"):
+        for want in ("--provenance=false", "--sbom=false", "APP_RELEASE=t-2026.1121.1",
+                     "linux/amd64,linux/arm64"):  # fmt: skip
             self.assertIn(want, cmd)
+        self.assertEqual(cmd[-3:], ["-f", "/app/image/Dockerfile", "/app"])
         self.assertNotIn("--builder", r.build_command("t", Path("/o"), Path("/c"), None))
+
+    def test_no_cargo_runs_on_this_machine(self):
+        """#821: the broker is built in the Dockerfile's stage, in BuildKit."""
+        src = Path(r.__file__).read_text()
+        self.assertNotIn('"cargo"', src)
+        dockerfile = Path(__file__).resolve().parents[1] / "apps/gha-runner/image/Dockerfile"
+        text = dockerfile.read_text()
+        self.assertIn("AS broker", text)
+        self.assertIn("RUN --network=none", text)
+        self.assertIn("COPY --from=broker", text)
+
+
+def oci_archive(d: Path, layers: dict[str, list[dict[str, bytes]]]) -> tuple[Path, dict[str, str]]:
+    """A small OCI archive: each architecture's manifest and gzipped layers."""
+    blobs: dict[str, bytes] = {}
+
+    def put(raw: bytes) -> str:
+        digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+        blobs[digest] = raw
+        return digest
+
+    def tar_of(files: dict[str, bytes]) -> bytes:
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as t:
+            for name, data in files.items():
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                t.addfile(info, io.BytesIO(data))
+        return gzip.compress(buf.getvalue())
+
+    digests = {}
+    for arch, ls in layers.items():
+        manifest = {"layers": [{"digest": put(tar_of(f))} for f in ls]}
+        digests[arch] = put(json.dumps(manifest).encode())
+    archive = d / "a.oci.tar"
+    with tarfile.open(archive, "w") as t:
+        for digest, raw in blobs.items():
+            info = tarfile.TarInfo(f"blobs/sha256/{digest.removeprefix('sha256:')}")
+            info.size = len(raw)
+            t.addfile(info, io.BytesIO(raw))
+    return archive, digests
 
 
 class Run(unittest.TestCase):

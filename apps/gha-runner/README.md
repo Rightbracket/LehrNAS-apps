@@ -105,5 +105,15 @@ python3 tools/check_template.py
 A release is `lehrdev runner release gha-runner-YYYY.MMDD.N` in the LehrNAS
 repository, which holds the signing key's tooling. `--no-push` is a rehearsal.
 
-The image pins the Ubuntu base by digest and verifies the runner tarball's SHA-256.
-A new upstream version changes `RUNNER_VERSION` and both hashes in the `Dockerfile`.
+The image is built from this folder, `-f image/Dockerfile`; its first stage
+builds the broker for both architectures, so building it needs no Rust here:
+
+```bash
+docker buildx build -f image/Dockerfile --platform linux/amd64,linux/arm64 \
+  --build-arg APP_RELEASE=gha-runner-YYYY.MMDD.N apps/gha-runner
+```
+
+The image pins the Ubuntu base and the Rust image by digest and verifies the
+runner tarball's SHA-256. A new upstream version changes `RUNNER_VERSION` and
+both hashes in the `Dockerfile`; a new toolchain in `rust-toolchain.toml`
+changes the Rust image's tag and digest with it.

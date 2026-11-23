@@ -2,16 +2,45 @@
 # services run it, and the environment picks the role (start.sh).
 #
 # Built from the upstream release tarball, not GitHub's image, which adds a
-# docker client and Kubernetes hooks this app doesn't want. `broker-bin/<arch>`
-# is the static broker, cross-built before the image (see the release command);
-# the base and the tarballs are pinned, so one version builds one thing.
+# docker client and Kubernetes hooks this app doesn't want. The base, the Rust
+# image and the tarballs are pinned, so one version builds one thing.
+#
+# Build it from the app's folder, not this one (image/Dockerfile.dockerignore
+# lets in only what it copies):
+#
+#   docker buildx build -f image/Dockerfile --platform linux/amd64,linux/arm64 \
+#     --build-arg APP_RELEASE=<tag> apps/gha-runner
+
+# The broker, static for both architectures, built here rather than on the
+# machine that runs the build (#821, §18.8): the crates' build scripts and
+# proc macros run in this stage alone, with no network once the crates are
+# fetched. It runs on the build's own platform and cross-links with Rust's
+# bundled rust-lld (src/broker/.cargo/config.toml), so both architectures come
+# from one build. The image is the official one at rust-toolchain.toml's version.
+FROM --platform=$BUILDPLATFORM docker.io/library/rust:1.98.1-slim-trixie@sha256:4cd829461bd5c4d511c32e269da9cb8929223b666519d8004e35fc8d1d771ab7 AS broker
+RUN rustup target add aarch64-unknown-linux-musl x86_64-unknown-linux-musl
+# The checkout's own path, so the binary names the same paths a build on any
+# machine would; the toolchain and the crates are remapped to neutral names.
+WORKDIR /src/apps/gha-runner/src/broker
+COPY src/broker/ ./
+RUN cargo fetch --locked
+RUN --network=none set -eu; \
+    export CARGO_ENCODED_RUSTFLAGS="$(printf '%s\037%s' \
+      "--remap-path-prefix=$CARGO_HOME=/cargo" "--remap-path-prefix=$RUSTUP_HOME=/rustup")"; \
+    for pair in amd64:x86_64-unknown-linux-musl arm64:aarch64-unknown-linux-musl; do \
+      arch=${pair%%:*}; triple=${pair#*:}; \
+      cargo build --frozen --quiet --release --target "$triple"; \
+      mkdir -p "/out/$arch"; \
+      cp "target/$triple/release/gha-runner-broker" "/out/$arch/"; \
+    done
+
 FROM docker.io/library/ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852
 
 ARG TARGETARCH
 ARG RUNNER_VERSION=2.338.2
 ARG RUNNER_SHA256_amd64=baebf204307bac6193480852732f0aba2ae97b6c5597c244f4d5558390147c40
 ARG RUNNER_SHA256_arm64=670adb2f268fe21dcbb58b3db0e0aa9d5b3bddfe2c651481336e561ff86de945
-# This image's own tag, from `lehrdev runner release`. An image built without it
+# This image's own tag, from the release (tools/release.py). An image built without it
 # would never say which release it is, so the build fails.
 ARG APP_RELEASE
 
@@ -51,9 +80,9 @@ RUN set -eu; \
       ln -s "/tmp/runner/$f" "/opt/runner/$f"; \
     done
 
-COPY broker-bin/${TARGETARCH}/gha-runner-broker /usr/local/bin/gha-runner-broker
-COPY start.sh runner-start.sh /usr/local/lib/gha-runner/
-COPY docker-stub /usr/local/bin/docker
+COPY --from=broker /out/${TARGETARCH}/gha-runner-broker /usr/local/bin/gha-runner-broker
+COPY image/start.sh image/runner-start.sh /usr/local/lib/gha-runner/
+COPY image/docker-stub /usr/local/bin/docker
 RUN chmod 0755 /usr/local/bin/gha-runner-broker /usr/local/bin/docker /usr/local/lib/gha-runner/*.sh \
  && test -n "$APP_RELEASE" \
  && printf '%s\n' "$APP_RELEASE" > /usr/local/lib/gha-runner/RELEASE

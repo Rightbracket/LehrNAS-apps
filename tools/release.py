@@ -28,10 +28,12 @@ What it does:
      an id that isn't `<app id>-…`, the same port, or an image that isn't
      `docker.io/<namespace>/<id>` or is an official one;
    - with `--build-only`, a step that holds any secret.
-2. **Builds** the app's static broker for both architectures, with this
-   machine's paths remapped, and scans the binaries for any that are left. Then
-   buildx builds both architectures into one OCI archive. No child of the
-   build gets the key, its password, the login or a token.
+2. **Builds** the image for both architectures into one OCI archive with
+   buildx, from the app's folder (`-f image/Dockerfile`). The Dockerfile's
+   first stage builds the static broker, so cargo and the crates' code run in
+   BuildKit, never on this machine (#821). Then it reads each architecture's
+   broker out of the archive and refuses one that names a local folder. No
+   child of the build gets the key, its password, the login or a token.
 3. **Pushes** to the entry's one repository, after asking it, logged in,
    that the tag isn't there, and checks it landed as built and reads without
    a login. Then it signs the list and each image with cosign, in the legacy
@@ -86,7 +88,8 @@ from pathlib import Path
 OFFICIAL = "official.toml"
 APP_CHANNEL_PUB = "app-channel.pub"
 KEY_REF = "env://SIGNING_KEY"
-TRIPLES = {"amd64": "x86_64-unknown-linux-musl", "arm64": "aarch64-unknown-linux-musl"}
+#: The architectures every image is built for.
+ARCHES = ("amd64", "arm64")
 INDEX_TYPES = (
     "application/vnd.oci.image.index.v1+json",
     "application/vnd.docker.distribution.manifest.list.v2+json",
@@ -418,9 +421,9 @@ def digests_of_index(index: dict, list_digest: str) -> dict[str, str]:
     out = {"list": list_digest}
     for m in index["manifests"]:
         arch = m.get("platform", {}).get("architecture")
-        if arch in TRIPLES:
+        if arch in ARCHES:
             out[arch] = m["digest"]
-    if set(out) != {"list", *TRIPLES}:
+    if set(out) != {"list", *ARCHES}:
         raise Refused(f"the list has {sorted(out)}; it should have both architectures")
     return out
 
@@ -437,38 +440,59 @@ def archive_digests(archive: Path) -> dict[str, str]:
     return digests_of_index(index, digest)
 
 
-def local_paths(files: list[Path], roots: list[str]) -> list[str]:
-    """The first few local paths in the binaries: a home or volume folder, or
-    any of `roots` (the checkout, the home folder)."""
+def local_paths(files: dict[str, bytes], roots: list[str]) -> list[str]:
+    """The first few local paths in the binaries, by name: a home or volume
+    folder, or any of `roots` (the checkout, the home folder)."""
     found = []
     words = [r.encode() for r in roots if r]
-    for p in files:
-        raw = p.read_bytes()
-        found += [f"{p.name}: {m.decode('latin1')}" for m in LOCAL_PATH.findall(raw)]
-        found += [f"{p.name}: {w.decode()}" for w in words if w in raw]
+    for name, raw in files.items():
+        found += [f"{name}: {m.decode('latin1')}" for m in LOCAL_PATH.findall(raw)]
+        found += [f"{name}: {w.decode()}" for w in words if w in raw]
     return found[:5]
 
 
-def remap_flags(home: Path, root: Path) -> str:
-    """cargo's encoded rustflags: the toolchain, the crates and the checkout
-    become neutral names in the binary."""
-    maps = [(home / ".cargo", "/cargo"), (home / ".rustup", "/rustup"), (root, "/src")]
-    return "\x1f".join(f"--remap-path-prefix={p}={to}" for p, to in maps)
+def _blob(t: tarfile.TarFile, digest: str):
+    f = t.extractfile(f"blobs/sha256/{digest.removeprefix('sha256:')}")
+    if f is None:
+        raise Refused(f"the archive has no blob {digest}")
+    return f
 
 
-def build_command(version: str, archive: Path, context: Path, builder: str | None) -> list[str]:
+def archive_file(archive: Path, digests: dict[str, str], path: str) -> dict[str, bytes]:
+    """One file of each architecture's image in an OCI archive, by
+    architecture: the copy in the last layer that has it."""
+    out = {}
+    with tarfile.open(archive) as t:
+        for arch in ARCHES:
+            manifest = json.loads(_blob(t, digests[arch]).read())
+            found = None
+            for layer in manifest["layers"]:
+                with tarfile.open(fileobj=_blob(t, layer["digest"]), mode="r|*") as lt:
+                    for m in lt:
+                        if m.name.removeprefix("./") == path and m.isfile():
+                            found = lt.extractfile(m).read()  # type: ignore[union-attr]
+            if found is None:
+                raise Refused(f"the {arch} image has no {path}")
+            out[f"{arch}/{Path(path).name}"] = found
+    return out
+
+
+def build_command(version: str, archive: Path, app_dir: Path, builder: str | None) -> list[str]:
     """Both architectures in one OCI archive, without buildx's attestations,
-    which would add manifests a box doesn't know. The tag goes in as
-    `APP_RELEASE`, and the image's build fails without it."""
+    which would add manifests a box doesn't know. The context is the app's
+    folder, which `image/Dockerfile.dockerignore` cuts down to what the
+    Dockerfile copies. The tag goes in as `APP_RELEASE`, and the image's build
+    fails without it."""
     cmd = ["docker", "buildx", "build"]
     if builder:
         cmd += ["--builder", builder]
     return cmd + [
-        "--platform", "linux/amd64,linux/arm64",
+        "--platform", ",".join(f"linux/{a}" for a in ARCHES),
         "--provenance=false", "--sbom=false",
         "--build-arg", f"APP_RELEASE={version}",
         "--output", f"type=oci,dest={archive}",
-        str(context),
+        "-f", str(app_dir / "image/Dockerfile"),
+        str(app_dir),
     ]  # fmt: skip
 
 
@@ -694,28 +718,20 @@ def check_free(p: Plan, skopeo: str) -> None:
 
 
 def build(p: Plan, out: Path) -> dict[str, str]:
-    """The broker and the image, into `out`, with no secret in any child's
+    """The image, broker included, into `out`, with no secret in any child's
     environment. Returns the digests and records them for the publish step."""
     print(f"PLAN | {p.tag} | {p.repo} | into {p.catalog_path.name}")
-    broker = p.app_dir / "src/broker"
-    env = {**scrubbed_env(), "CARGO_ENCODED_RUSTFLAGS": remap_flags(Path.home(), p.root)}
-    built = []
-    for arch, triple in TRIPLES.items():
-        _sh("cargo", "build", "--locked", "--quiet", "--release", "--target", triple,
-            cwd=broker, env=env)  # fmt: skip
-        dest = p.app_dir / f"image/broker-bin/{arch}"
-        dest.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(broker / f"target/{triple}/release/{broker_name(p.app_dir)}", dest)
-        built.append(dest / broker_name(p.app_dir))
-    if leaks := local_paths(built, [str(p.root), str(Path.home())]):
-        raise Refused(f"the broker names this machine's folders: {'; '.join(leaks)}")
     out.mkdir(parents=True, exist_ok=True)
     archive = out / f"{p.tag}.oci.tar"
-    cmd = build_command(p.tag, archive, p.app_dir / "image", os.environ.get("BUILDX_BUILDER"))
+    cmd = build_command(p.tag, archive, p.app_dir, os.environ.get("BUILDX_BUILDER"))
     if subprocess.run(cmd, env=scrubbed_env(), check=False).returncode != 0:
         raise Refused("the image's build failed (its output is above)")
     digests = archive_digests(archive)
     print(f"IMAGE | {p.tag} | list {digests['list']}")
+    brokers = archive_file(archive, digests, f"usr/local/bin/{broker_name(p.app_dir)}")
+    if leaks := local_paths(brokers, [str(p.root), str(Path.home())]):
+        archive.unlink()
+        raise Refused(f"the broker names this machine's folders: {'; '.join(leaks)}")
     record = {"tag": p.tag, "head": _git(p.root, "rev-parse", "HEAD"),
               "catalog": p.catalog_path.name, "digests": digests}  # fmt: skip
     (out / BUILT).write_text(json.dumps(record, indent=1) + "\n")
