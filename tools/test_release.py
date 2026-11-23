@@ -407,6 +407,9 @@ class Run(unittest.TestCase):
             (self.root / name).write_text(text)
         git = ["git", "-C", str(self.root)]
         subprocess.run([*git, "init", "-q"], check=True)
+        # Its own identity: a hosted runner has none, and git var asks for it.
+        subprocess.run([*git, "config", "user.name", "t"], check=True)
+        subprocess.run([*git, "config", "user.email", "t@t"], check=True)
         subprocess.run([*git, "add", "-A"], check=True)
         subprocess.run(
             [*git, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "x"], check=True
