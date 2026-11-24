@@ -49,7 +49,10 @@ image (`eshork/<id>`) and its tags (`<id>-<version>`).
      organisation's secrets, so the release refuses a run that has any. The job's
      `if` names this repository, so a copy never runs it, and it joins the app's
      own group: `concurrency: {group: release-<id>, cancel-in-progress: false,
-     queue: max}`.
+     queue: max}`. It grants what the release needs, `permissions: {contents:
+     write, actions: read, deployments: read}`: without that, GitHub refuses the
+     whole workflow at its start, the CI too, because the called jobs ask for more
+     than the caller allows.
 
    `app-gha-runner.yml` is the example.
 4. The release builds the image on our own runner (`lehr-image-build`), in the VM its
@@ -62,16 +65,18 @@ image (`eshork/<id>`) and its tags (`<id>-<version>`).
    - **The key and the Docker Hub token** are secrets of the `app-channel`
      environment (`CHANNEL_KEY`, `CHANNEL_KEY_PASSWORD`, `DOCKERHUB_TOKEN`), which
      admits `main` alone. The release refuses to start without that rule, or while
-     the repository or the organisation holds any secret, and the publish refuses an
-     empty one, so only `main` can release. Set them with `--env app-channel`,
+     this repository can read any repository or organisation secret, and the publish
+     refuses an empty one, so only `main` can release. Set them with `--env app-channel`,
      never as repository secrets.
-   - **One release of an app at a time, one publish at a time, none cancelled:**
-     the build picks the tag and bakes it into the image, so the app's group holds
-     a whole release run, and two builds of one app never pick the same tag. Every
-     publish commits a catalog to `main`, so the publish job also joins one group
-     for the repository. Both say `queue: max`: up to 100 wait, about in the order
-     they began waiting. Under GitHub's default a third arrival would cancel the one
-     waiting.
+   - **One release of an app at a time, none cancelled:** the build picks the tag and
+     bakes it into the image, so the app's group holds a whole release run, and two
+     builds of one app never pick the same tag. It says `queue: max`: up to 100 wait,
+     about in the order they began waiting. Under GitHub's default a third arrival
+     would cancel the one waiting.
+   - **Two apps' releases can collide on `main`:** each publish commits its catalog
+     entry on its own run's commit, so one that finds `main` moved by another app's
+     release is refused, and its signed image waits for a dispatch (LehrNAS #874).
+     With one app, nothing does yet.
    - **An app needs a `src/broker` crate, for now:** `tools/release.py` reads the
      broker's name from `src/broker/Cargo.toml` to scan the image's binary
      (`broker_name`), so an app without one fails there until LehrNAS
