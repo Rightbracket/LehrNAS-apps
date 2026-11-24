@@ -43,9 +43,9 @@ image (`eshork/<id>`) and its tags (`<id>-<version>`).
      `--locked`) and its test scripts (`tests:`, one a line, run from the root).
    - **`release.yml`, its release, after the CI and on `main` alone:** `app`,
      `catalog: official.toml` and `environment: app-channel`, and `secrets: inherit`.
-     The caller's job has no environment, so it can't pass app-channel's secrets;
-     the release's publish job reads them there itself, which GitHub allows only
-     with `inherit`. inherit would also hand every job the repository's and the
+     The release's publish job reads app-channel's secrets there itself; GitHub
+     gives it one only for a name its caller passes, and `inherit` passes them all.
+     inherit would also hand every job the repository's and the
      organisation's secrets, so the release refuses a run that has any. The job's
      `if` names this repository, so a copy never runs it, and it joins the app's
      own group: `concurrency: {group: release-<id>, cancel-in-progress: false,
