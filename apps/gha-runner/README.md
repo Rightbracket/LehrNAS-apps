@@ -112,7 +112,7 @@ The image is built from this folder, `-f image/Dockerfile`; its first stage
 builds the broker for both architectures, so building it needs no Rust here:
 
 ```bash
-docker buildx build -f image/Dockerfile --platform linux/amd64,linux/arm64 \
+docker buildx build -f apps/gha-runner/image/Dockerfile --platform linux/amd64,linux/arm64 \
   --build-arg APP_RELEASE=gha-runner-YYYY.MMDD.N apps/gha-runner
 ```
 

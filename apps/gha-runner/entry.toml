@@ -1,7 +1,8 @@
 # The GitHub runner's entry, without its version and digests (docs/spec-runner-app.md
-# §2 in LehrNAS; the format is spec-app-catalog §3). `lehrdev runner release` fills
-# the version, the day, compose.yaml's tag and hash and the digests, and writes the result into
-# official.toml; everything else is edited here, by hand.
+# §2 in LehrNAS; the format is spec-app-catalog §3). tools/release.py, run by
+# release.yml, fills the version, the day, compose.yaml's tag and hash and the
+# digests, and writes the result into the catalog; everything else is edited
+# here, by hand.
 [[apps]]
 id = "gha-runner"
 name = "Runner for GitHub Actions"

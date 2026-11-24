@@ -201,7 +201,8 @@ jobs:
           PY
       # A push releases only what changed since the release's last tag: the
       # app's folder, the tool or the identity. A dispatch always releases
-      # (a rebuild takes the base image's and packages' updates). A run that
+      # (a rebuild takes the named apt packages' updates; the base images are
+      # pinned by digest, and move only with the Dockerfile). A run that
       # failed leaves the change for the next push or dispatch to release.
       - name: anything to release
         id: changed
@@ -289,8 +290,8 @@ jobs:
       - name: the build (no secrets)
         run: |
           set -eu
-          # A publish that never ran (cancelled while it waited) leaves its
-          # build behind: anything older than a day goes.
+          # A run cancelled, or a runner lost, between its build and its
+          # publish leaves the build behind: anything older than a day goes.
           mkdir -p "$(dirname "$BUILD_DIR")"
           find "$(dirname "$BUILD_DIR")" -mindepth 1 -maxdepth 1 -mtime +0 -exec rm -rf {} +
           rm -rf "$BUILD_DIR"

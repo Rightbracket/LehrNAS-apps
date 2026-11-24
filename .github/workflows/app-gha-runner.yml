@@ -11,7 +11,9 @@ on:
       - .github/workflows/app.yml
       - .github/workflows/release.yml
   # A rebuild by hand, from main alone (release.yml's plan refuses another
-  # branch): it takes the base image's and the packages' updates.
+  # branch): it takes the named apt packages' updates. The base images are
+  # pinned by digest, so their updates come only with a change to the
+  # Dockerfile's digests, which a push then releases.
   workflow_dispatch:
 permissions:
   contents: read
@@ -28,8 +30,11 @@ jobs:
     needs: ci
     if: github.repository == 'Rightbracket/LehrNAS-apps' && github.ref == 'refs/heads/main'
     uses: ./.github/workflows/release.yml
-    # One release of this app at a time, plan to publish: the build picks
-    # the tag, so two builds before either publish would pick the same one.
+    # One release of this app at a time, plan to publish, as far as GitHub
+    # applies a caller job's group to the jobs it calls (its pages don't
+    # say; no two runs have overlapped yet): the build picks the tag, so two
+    # builds before either publish would pick the same one, and the second
+    # would be refused.
     # Up to 100 wait, none cancelled; GitHub's default queue keeps one and
     # cancels it when a third arrives.
     concurrency:
