@@ -73,7 +73,10 @@ image (`eshork/<id>`) and its tags (`<id>-<version>`).
      app-channel`, never as repository secrets.
    - **Every official publish waits for the owner:** `app-channel` has the owner as
      its required reviewer, and the release refuses to start without one, so each
-     publish waits for the owner to approve it in the run (LehrNAS #875).
+     publish waits for the owner to approve it in the run (LehrNAS #875). Approve the
+     newest waiting run: a publish whose run's commit is no longer `main` (another
+     push landed while it waited) stops before it pushes or signs anything, and a
+     dispatch from `main` releases it.
    - **One release of an app at a time, none cancelled:** the build picks the tag and
      bakes it into the image, so the app's group is meant to hold a whole release run,
      and two builds of one app to pick different tags. GitHub's pages don't say that
