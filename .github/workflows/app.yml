@@ -45,7 +45,9 @@ jobs:
       RUST: ${{ inputs.rust }}
       TESTS: ${{ inputs.tests }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: the app's folder, and every path the caller names in it
         run: |
           set -eu

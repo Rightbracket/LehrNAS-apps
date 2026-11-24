@@ -35,8 +35,7 @@ jobs:
     with:
       app: gha-runner
       catalog: official.toml
+      # The key, its password and the Docker Hub token are app-channel's,
+      # which admits main alone; release.yml's publish job reads them there.
+      # Nothing is passed: this job has no environment to pass them from.
       environment: app-channel
-    secrets:
-      CHANNEL_KEY: ${{ secrets.CHANNEL_KEY }}
-      CHANNEL_KEY_PASSWORD: ${{ secrets.CHANNEL_KEY_PASSWORD }}
-      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}

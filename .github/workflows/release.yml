@@ -13,19 +13,17 @@
 #         app: <id>
 #         catalog: official.toml
 #         environment: app-channel
-#       secrets:
-#         CHANNEL_KEY: ${{ secrets.CHANNEL_KEY }}
-#         CHANNEL_KEY_PASSWORD: ${{ secrets.CHANNEL_KEY_PASSWORD }}
-#         DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
 #
-# official.toml's secrets live in the GitHub environment the caller names,
-# never on the repository, and that environment admits main alone: the plan
-# job refuses a release into official.toml without one, and an environment
-# that doesn't exist or admits any other branch, before the publish job could
-# reach it (a run that names a missing environment makes one with no rules).
-# The caller passes the secrets by name; GitHub reads them out of the
-# environment for the publish job alone. Another catalog's release (a test
-# bed's, signed with its own key) may take its secrets from the repository.
+# The secrets live in the GitHub environment the caller names, never on the
+# repository, and that environment admits main alone. The caller passes none:
+# a caller's job has no environment, so it can't reach an environment's
+# secrets, and LehrNAS-apps has no others. The publish job names the
+# environment and GitHub gives it the environment's secrets under the names
+# below (an environment's secret wins over one a caller passes). The plan job
+# refuses a release without an environment, and one that doesn't exist or
+# admits any other branch, before the publish job could reach it: a run that
+# names a missing environment makes one, with no rules. The publish refuses an
+# empty secret.
 #
 # What runs where: the plan on a hosted runner (git and GitHub's API, no
 # secret); the build and the publish on the Mac's `lehr-image-build` runner,
@@ -48,26 +46,23 @@ on:
         type: string
         default: ""
       environment:
-        description: >-
-          the GitHub environment that holds the secrets, admitting main alone;
-          official.toml's release must name one, another catalog's may not
+        description: the GitHub environment that holds the secrets, admitting main alone
         type: string
-        default: ""
+        required: true
+    # Read out of the environment by the publish job: a caller passes none
+    # (it can't pass an environment's). Declared so the publish job may name
+    # them; a test bed may pass one it keeps on the repository, which its
+    # environment's secret of the same name would override.
     secrets:
       CHANNEL_KEY:
         description: the cosign private key whose public half the catalog's [channel] key names
-        required: true
+        required: false
       CHANNEL_KEY_PASSWORD:
         description: its password
-        required: true
+        required: false
       DOCKERHUB_TOKEN:
         description: a Docker Hub token for the image's namespace
-        required: true
-# One release at a time in the repository, never cancelled: every release
-# commits a catalog to main, so two at once would refuse each other's push.
-concurrency:
-  group: app-release
-  cancel-in-progress: false
+        required: false
 permissions:
   contents: read
 jobs:
@@ -131,27 +126,18 @@ jobs:
           parts = image.split("/") if isinstance(image, str) else []
           if len(parts) != 3 or parts[0] != "docker.io":
               stop(f"the image {image!r} isn't docker.io/<namespace>/<name>")
-          official = Path("official.toml")
-          is_official = official.exists() and (
-              Path(catalog).resolve() == official.resolve() or Path(catalog).samefile(official))
           print(f"id={rid}")
           print(f"user={parts[1]}")
-          print(f"official={'true' if is_official else 'false'}")
           PY
           cat "$GITHUB_OUTPUT"
       - name: the environment exists and admits main alone
         env:
           GH_TOKEN: ${{ github.token }}
-          OFFICIAL: ${{ steps.names.outputs.official }}
         run: |
           set -eu
-          if [ -z "$ENVIRONMENT" ]; then
-            if [ "$OFFICIAL" = true ]; then
-              echo "::error::a release into official.toml takes its secrets from an environment that admits main alone; the caller names none"
-              exit 1
-            fi
-            echo "ENVIRONMENT | none | $CATALOG isn't official.toml: the secrets the caller passes are the repository's"
-            exit 0
+          if ! [[ $ENVIRONMENT =~ ^[A-Za-z0-9._-]+$ ]]; then
+            echo "::error::the release takes its secrets from an environment that admits main alone; the caller names '$ENVIRONMENT'"
+            exit 1
           fi
           if ! env_json=$(gh api "repos/$GITHUB_REPOSITORY/environments/$ENVIRONMENT" 2>&1); then
             echo "::error::can't read the environment $ENVIRONMENT ($env_json). A repository admin makes it, admitting main alone, and puts the secrets in it; nothing is released before then."
@@ -249,6 +235,10 @@ jobs:
       - name: the build (no secrets)
         run: |
           set -eu
+          # A publish that never ran (cancelled while it waited) leaves its
+          # build behind: anything older than a day goes.
+          mkdir -p "$(dirname "$BUILD_DIR")"
+          find "$(dirname "$BUILD_DIR")" -mindepth 1 -maxdepth 1 -mtime +0 -exec rm -rf {} +
           rm -rf "$BUILD_DIR"
           args=(--catalog "$CATALOG")
           [ -z "$AS" ] || args+=(--as "$AS")
@@ -272,11 +262,23 @@ jobs:
   # nothing the build left behind runs with the key. No build process
   # outlives the build job: the runner ends its orphans at the job's end.
   # The secrets come from the environment, which admits main alone.
+  #
+  # One publish at a time in the repository: each checks that its tag isn't
+  # on the registry yet, pushes and signs, and pushes a catalog commit to main,
+  # so two at once could race on a tag or refuse each other's push. Only this
+  # job joins the group, never a plan that releases nothing or a build (the
+  # one image-build runner takes one job at a time anyway). GitHub keeps one
+  # publish waiting behind the running one; a third that arrives cancels the
+  # waiting one, which then shows as cancelled: its change is released by the
+  # next push that touches the app, or by a dispatch.
   publish:
     needs: [plan, build]
     runs-on: [self-hosted, macOS, ARM64, lehr-image-build]
     timeout-minutes: 20
     environment: ${{ inputs.environment }}
+    concurrency:
+      group: app-release-publish
+      cancel-in-progress: false
     permissions:
       contents: write
     defaults:
@@ -286,6 +288,7 @@ jobs:
       APP: ${{ inputs.app }}
       CATALOG: ${{ inputs.catalog }}
       AS: ${{ inputs.as }}
+      ENVIRONMENT: ${{ inputs.environment }}
       BUILD_DIR: ${{ github.workspace }}/../../release-build/${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: an empty workspace (nothing of the build's, its .git included)
@@ -312,7 +315,7 @@ jobs:
           HUB_USER: ${{ needs.plan.outputs.user }}
         run: |
           set -eu
-          [ -n "$DOCKERHUB_TOKEN" ] || { echo "::error::no DOCKERHUB_TOKEN secret in the environment"; exit 1; }
+          [ -n "$DOCKERHUB_TOKEN" ] || { echo "::error::no DOCKERHUB_TOKEN secret in the environment $ENVIRONMENT"; exit 1; }
           mkdir -p "$RUNNER_TEMP/auth" && chmod 700 "$RUNNER_TEMP/auth"
           # skopeo checks the login with Docker Hub here, so a rejected token stops
           # the job now, in plain words, not as a 401 halfway through a push.
@@ -341,6 +344,8 @@ jobs:
           COSIGN_PASSWORD: ${{ secrets.CHANNEL_KEY_PASSWORD }}
         run: |
           set -eu
+          [ -n "$SIGNING_KEY" ] || { echo "::error::no CHANNEL_KEY secret in the environment $ENVIRONMENT"; exit 1; }
+          [ -n "$COSIGN_PASSWORD" ] || { echo "::error::no CHANNEL_KEY_PASSWORD secret in the environment $ENVIRONMENT"; exit 1; }
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           args=(--catalog "$CATALOG")
