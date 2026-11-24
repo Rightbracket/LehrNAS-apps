@@ -18,8 +18,9 @@
 # repository, and that environment admits main alone. The caller passes none:
 # a caller's job has no environment, so it can't reach an environment's
 # secrets, and LehrNAS-apps has no others. The publish job names the
-# environment and GitHub gives it the environment's secrets under the names
-# below (an environment's secret wins over one a caller passes). The plan job
+# environment and reads CHANNEL_KEY, CHANNEL_KEY_PASSWORD and DOCKERHUB_TOKEN
+# from it; this workflow declares no secrets, since a declared one the
+# caller doesn't pass would hide the environment's (see below). The plan job
 # refuses a release without an environment, and one that doesn't exist or
 # admits any other branch, before the publish job could reach it: a run that
 # names a missing environment makes one, with no rules. The publish refuses an
@@ -49,20 +50,11 @@ on:
         description: the GitHub environment that holds the secrets, admitting main alone
         type: string
         required: true
-    # Read out of the environment by the publish job: a caller passes none
-    # (it can't pass an environment's). Declared so the publish job may name
-    # them; a test bed may pass one it keeps on the repository, which its
-    # environment's secret of the same name would override.
-    secrets:
-      CHANNEL_KEY:
-        description: the cosign private key whose public half the catalog's [channel] key names
-        required: false
-      CHANNEL_KEY_PASSWORD:
-        description: its password
-        required: false
-      DOCKERHUB_TOKEN:
-        description: a Docker Hub token for the image's namespace
-        required: false
+    # No secrets are declared, on purpose. The publish job reads CHANNEL_KEY,
+    # CHANNEL_KEY_PASSWORD and DOCKERHUB_TOKEN from the environment it names.
+    # A secret declared here that the caller doesn't pass is empty in every
+    # job, environment or not: it hides the environment's secret of the same
+    # name (the copy's run 45457934914 showed it).
 permissions:
   contents: read
 jobs:
