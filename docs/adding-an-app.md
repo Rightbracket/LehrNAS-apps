@@ -47,7 +47,9 @@ image (`eshork/<id>`) and its tags (`<id>-<version>`).
      the release's publish job reads them there itself, which GitHub allows only
      with `inherit`. inherit would also hand every job the repository's and the
      organisation's secrets, so the release refuses a run that has any. The job's
-     `if` names this repository, so a copy never runs it.
+     `if` names this repository, so a copy never runs it, and it joins the app's
+     own group: `concurrency: {group: release-<id>, cancel-in-progress: false,
+     queue: max}`.
 
    `app-gha-runner.yml` is the example.
 4. The release builds the image on our own runner (`lehr-image-build`), signs it with
@@ -61,12 +63,13 @@ image (`eshork/<id>`) and its tags (`<id>-<version>`).
      the repository or the organisation holds any secret, and the publish refuses an
      empty one, so only `main` can release. Set them with `--env app-channel`,
      never as repository secrets.
-   - **One publish at a time** in the repository: each checks its tag on the
-     registry and commits a catalog to `main`. Only the publish job waits its turn;
-     a plan that releases nothing never does. GitHub keeps one publish waiting
-     behind the running one, and a third that arrives cancels the waiting one
-     (shown as cancelled): its change goes out with the next push that touches the
-     app, or a dispatch.
+   - **One release of an app at a time, one publish at a time, none cancelled:**
+     the build picks the tag and bakes it into the image, so the app's group holds
+     a whole release run, and two builds of one app never pick the same tag. Every
+     publish commits a catalog to `main`, so the publish job also joins one group
+     for the repository. Both say `queue: max`: up to 100 wait, about in the order
+     they began waiting. Under GitHub's default a third arrival would cancel the one
+     waiting.
    - **An app needs a `src/broker` crate, for now:** `tools/release.py` reads the
      broker's name from `src/broker/Cargo.toml` to scan the image's binary
      (`broker_name`, line 731), so an app without one fails there until LehrNAS
