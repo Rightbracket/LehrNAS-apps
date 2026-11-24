@@ -214,8 +214,6 @@ jobs:
       APP: ${{ inputs.app }}
       CATALOG: ${{ inputs.catalog }}
       AS: ${{ inputs.as }}
-      COLIMA_PROFILE: lehr-build
-      BUILDX_BUILDER: lehr-build
       # Outside the workspace and the job's temp folder, which the next job
       # empties: the publish job reads the archive and its record from here.
       BUILD_DIR: ${{ github.workspace }}/../../release-build/${{ github.run_id }}-${{ github.run_attempt }}
@@ -227,6 +225,15 @@ jobs:
       - name: the engine (colima's VM, stopped again at the end)
         run: |
           set -eu
+          # Each image-build runner has a VM of its own, named in the runner's
+          # .env (LEHR_BUILD_ENGINE; dev/ci-runner/image-build-runner.sh in
+          # LehrNAS), so one repository's builds never share a VM, or its build
+          # cache, with another's. The buildx builder is named after it too: a
+          # builder is bound to the engine it was made on.
+          engine=${LEHR_BUILD_ENGINE:-lehr-build}
+          [[ $engine =~ ^lehr-build(-[a-z0-9]+)*$ ]] || { echo "::error::LEHR_BUILD_ENGINE '$engine' isn't lehr-build[-<name>]"; exit 1; }
+          export COLIMA_PROFILE=$engine BUILDX_BUILDER=$engine
+          { echo "COLIMA_PROFILE=$engine"; echo "BUILDX_BUILDER=$engine"; } >> "$GITHUB_ENV"
           # No mount of the account's home: the build context goes over the API.
           mkdir -p "$HOME/.colima-no-mount"
           colima start --profile "$COLIMA_PROFILE" --vm-type vz --vz-rosetta \
@@ -252,6 +259,7 @@ jobs:
         run: |
           # The cache keeps at most 3 GB, and fstrim hands the freed blocks back
           # to the VM's sparse disk on OBELISK, which lehrdev du counts (D152).
+          [ -n "${COLIMA_PROFILE:-}" ] || exit 0
           docker buildx prune --builder "$BUILDX_BUILDER" --force --max-used-space 3gb || true
           colima ssh --profile "$COLIMA_PROFILE" -- sudo fstrim -av || true
           colima stop --profile "$COLIMA_PROFILE" || true
