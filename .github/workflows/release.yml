@@ -1,0 +1,359 @@
+# An app's release on our own runner (spec-runner-app.md §18.8 in LehrNAS,
+# #259, #268): build the image, push it, sign it, write and sign its entry in
+# a catalog at the root, and push that commit and its tag to main. Called by
+# the app's workflow after its CI, on main alone; no command is run by hand.
+#
+#   jobs:
+#     release:
+#       needs: ci
+#       if: github.ref == 'refs/heads/main'
+#       uses: ./.github/workflows/release.yml
+#       permissions: {contents: write, actions: read, deployments: read}
+#       with:
+#         app: <id>
+#         catalog: official.toml
+#         environment: app-channel
+#       secrets:
+#         CHANNEL_KEY: ${{ secrets.CHANNEL_KEY }}
+#         CHANNEL_KEY_PASSWORD: ${{ secrets.CHANNEL_KEY_PASSWORD }}
+#         DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+#
+# official.toml's secrets live in the GitHub environment the caller names,
+# never on the repository, and that environment admits main alone: the plan
+# job refuses a release into official.toml without one, and an environment
+# that doesn't exist or admits any other branch, before the publish job could
+# reach it (a run that names a missing environment makes one with no rules).
+# The caller passes the secrets by name; GitHub reads them out of the
+# environment for the publish job alone. Another catalog's release (a test
+# bed's, signed with its own key) may take its secrets from the repository.
+#
+# What runs where: the plan on a hosted runner (git and GitHub's API, no
+# secret); the build and the publish on the Mac's `lehr-image-build` runner,
+# where every piece of third-party build code runs in BuildKit, in colima's VM
+# (#821), and the Mac runs only our tools.
+name: release
+on:
+  workflow_call:
+    inputs:
+      app:
+        description: the app's id, its folder under apps/
+        type: string
+        required: true
+      catalog:
+        description: the catalog file at the repository's root that the entry goes into
+        type: string
+        required: true
+      as:
+        description: an identity file to release the app as (tools/release.py --as); none for the app's own
+        type: string
+        default: ""
+      environment:
+        description: >-
+          the GitHub environment that holds the secrets, admitting main alone;
+          official.toml's release must name one, another catalog's may not
+        type: string
+        default: ""
+    secrets:
+      CHANNEL_KEY:
+        description: the cosign private key whose public half the catalog's [channel] key names
+        required: true
+      CHANNEL_KEY_PASSWORD:
+        description: its password
+        required: true
+      DOCKERHUB_TOKEN:
+        description: a Docker Hub token for the image's namespace
+        required: true
+# One release at a time in the repository, never cancelled: every release
+# commits a catalog to main, so two at once would refuse each other's push.
+concurrency:
+  group: app-release
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  # What would be released, on a hosted runner with no secret: the inputs
+  # checked, the environment's rule checked, and whether anything changed.
+  plan:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      # Reading the environment and its branch rule.
+      actions: read
+      deployments: read
+    defaults:
+      run:
+        shell: bash
+    env:
+      APP: ${{ inputs.app }}
+      CATALOG: ${{ inputs.catalog }}
+      AS: ${{ inputs.as }}
+      ENVIRONMENT: ${{ inputs.environment }}
+    outputs:
+      release: ${{ steps.changed.outputs.release }}
+      user: ${{ steps.names.outputs.user }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: the app, the catalog and the identity
+        id: names
+        run: |
+          set -eu
+          python3 -I - "$APP" "$CATALOG" "$AS" >> "$GITHUB_OUTPUT" <<'PY'
+          import re, sys, tomllib
+          from pathlib import Path
+          app, catalog, ident = sys.argv[1:]
+          def stop(why):
+              print(f"::error::{why}", file=sys.stderr)
+              sys.exit(1)
+          if not re.fullmatch(r"[a-z0-9]+(?:[._-][a-z0-9]+)*", app):
+              stop(f"app {app!r} isn't an app's id")
+          entry = Path("apps", app, "entry.toml")
+          if not entry.is_file():
+              stop(f"no {entry}")
+          if not re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9._-]*\.toml", catalog) or not Path(catalog).is_file():
+              stop(f"{catalog!r} isn't a catalog at the repository's root")
+          if ident:
+              if not re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9._-]*(?:/[A-Za-z0-9_-][A-Za-z0-9._-]*)*\.toml", ident) \
+                      or not Path(ident).is_file():
+                  stop(f"{ident!r} isn't an identity file in the repository")
+              d = tomllib.loads(Path(ident).read_text())
+              rid, image = d.get("id"), d.get("image")
+          else:
+              d = tomllib.loads(entry.read_text())["apps"][0]
+              rid, image = d.get("id"), {i["image"] for i in d.get("images", [])}
+              image = image.pop() if len(image) == 1 else None
+          if not isinstance(rid, str) or not re.fullmatch(r"[a-z0-9]+(?:[._-][a-z0-9]+)*", rid):
+              stop(f"the release's id {rid!r} isn't a name")
+          parts = image.split("/") if isinstance(image, str) else []
+          if len(parts) != 3 or parts[0] != "docker.io":
+              stop(f"the image {image!r} isn't docker.io/<namespace>/<name>")
+          official = Path("official.toml")
+          is_official = official.exists() and (
+              Path(catalog).resolve() == official.resolve() or Path(catalog).samefile(official))
+          print(f"id={rid}")
+          print(f"user={parts[1]}")
+          print(f"official={'true' if is_official else 'false'}")
+          PY
+          cat "$GITHUB_OUTPUT"
+      - name: the environment exists and admits main alone
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OFFICIAL: ${{ steps.names.outputs.official }}
+        run: |
+          set -eu
+          if [ -z "$ENVIRONMENT" ]; then
+            if [ "$OFFICIAL" = true ]; then
+              echo "::error::a release into official.toml takes its secrets from an environment that admits main alone; the caller names none"
+              exit 1
+            fi
+            echo "ENVIRONMENT | none | $CATALOG isn't official.toml: the secrets the caller passes are the repository's"
+            exit 0
+          fi
+          if ! env_json=$(gh api "repos/$GITHUB_REPOSITORY/environments/$ENVIRONMENT" 2>&1); then
+            echo "::error::can't read the environment $ENVIRONMENT ($env_json). A repository admin makes it, admitting main alone, and puts the secrets in it; nothing is released before then."
+            exit 1
+          fi
+          rules=$(gh api "repos/$GITHUB_REPOSITORY/environments/$ENVIRONMENT/deployment-branch-policies" 2>&1) \
+            || { echo "::error::can't read $ENVIRONMENT's branch rule ($rules)"; exit 1; }
+          ENV_JSON=$env_json RULES=$rules python3 -I - <<'PY'
+          import json, os, sys
+          policy = json.loads(os.environ["ENV_JSON"]).get("deployment_branch_policy")
+          rules = [(r.get("type"), r.get("name")) for r in json.loads(os.environ["RULES"]).get("branch_policies", [])]
+          env = os.environ["ENVIRONMENT"]
+          if not policy or policy.get("protected_branches") or not policy.get("custom_branch_policies") \
+                  or rules != [("branch", "main")] or json.loads(os.environ["RULES"]).get("total_count") != 1:
+              print(f"::error::the environment {env} must admit the branch main alone (its rule: {policy}, {rules}); "
+                    "nothing is released until it does", file=sys.stderr)
+              sys.exit(1)
+          print(f"ENVIRONMENT | {env} | main alone")
+          PY
+      # A push releases only what changed since the release's last tag: the
+      # app's folder, the tool or the identity. A dispatch always releases
+      # (a rebuild takes the base image's and packages' updates). A run that
+      # failed leaves the change for the next push or dispatch to release.
+      - name: anything to release
+        id: changed
+        env:
+          ID: ${{ steps.names.outputs.id }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -eu
+          paths=("apps/$APP" tools/release.py)
+          [ -z "$AS" ] || paths+=("$AS")
+          last=$(git describe --tags --abbrev=0 --match "$ID-20*" HEAD 2>/dev/null || true)
+          if [ "$EVENT" = workflow_dispatch ]; then
+            why="a dispatch"; release=true
+          elif [ -z "$last" ]; then
+            why="no release of $ID yet"; release=true
+          elif git diff --quiet "$last" HEAD -- "${paths[@]}"; then
+            why="nothing changed since $last"; release=false
+          else
+            why="changed since $last: $(git diff --name-only "$last" HEAD -- "${paths[@]}" | head -5 | paste -sd ' ' -)"; release=true
+          fi
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+          echo "PLAN | $ID | release=$release | $why" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # The build: the tool's tests, then buildx, with no secret in the job at
+  # all. Every piece of third-party build code (the crates' build scripts and
+  # proc macros, the image's RUN steps) runs in BuildKit, in colima's VM: the
+  # Dockerfile's first stage builds the broker (#821, §18.8). On this Mac the
+  # job runs only our tools, and no cargo or rustc.
+  build:
+    needs: plan
+    if: needs.plan.outputs.release == 'true'
+    runs-on: [self-hosted, macOS, ARM64, lehr-image-build]
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    env:
+      APP: ${{ inputs.app }}
+      CATALOG: ${{ inputs.catalog }}
+      AS: ${{ inputs.as }}
+      COLIMA_PROFILE: lehr-build
+      BUILDX_BUILDER: lehr-build
+      # Outside the workspace and the job's temp folder, which the next job
+      # empties: the publish job reads the archive and its record from here.
+      BUILD_DIR: ${{ github.workspace }}/../../release-build/${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0, pinned: it runs on the Mac
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: the engine (colima's VM, stopped again at the end)
+        run: |
+          set -eu
+          # No mount of the account's home: the build context goes over the API.
+          mkdir -p "$HOME/.colima-no-mount"
+          colima start --profile "$COLIMA_PROFILE" --vm-type vz --vz-rosetta \
+            --cpu 4 --memory 4 --disk 30 --mount "$HOME/.colima-no-mount"
+          host=$(docker context inspect "colima-$COLIMA_PROFILE" --format '{{.Endpoints.docker.Host}}')
+          echo "DOCKER_HOST=$host" >> "$GITHUB_ENV"
+          export DOCKER_HOST=$host
+          docker buildx inspect "$BUILDX_BUILDER" >/dev/null 2>&1 \
+            || docker buildx create --name "$BUILDX_BUILDER" --driver docker-container
+          docker buildx inspect --bootstrap "$BUILDX_BUILDER" | head -20
+      - name: the tool's own tests
+        run: python3 -I -m unittest discover -s tools -p 'test_*.py'
+      - name: the build (no secrets)
+        run: |
+          set -eu
+          rm -rf "$BUILD_DIR"
+          args=(--catalog "$CATALOG")
+          [ -z "$AS" ] || args+=(--as "$AS")
+          python3 -I tools/release.py "apps/$APP" "${args[@]}" --tag next --build-only --out "$BUILD_DIR" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: the build's cache pruned and the VM stopped, whatever happened
+        if: always()
+        run: |
+          # The cache keeps at most 3 GB, and fstrim hands the freed blocks back
+          # to the VM's sparse disk on OBELISK, which lehrdev du counts (D152).
+          docker buildx prune --builder "$BUILDX_BUILDER" --force --max-used-space 3gb || true
+          colima ssh --profile "$COLIMA_PROFILE" -- sudo fstrim -av || true
+          colima stop --profile "$COLIMA_PROFILE" || true
+          du -sh "$HOME/.colima" || true
+      - name: a failed build's folder removed
+        if: failure()
+        run: rm -rf "$BUILD_DIR"
+
+  # The publish: a fresh workspace, a clean tree, and HEAD's own tool, so
+  # nothing the build left behind runs with the key. No build process
+  # outlives the build job: the runner ends its orphans at the job's end.
+  # The secrets come from the environment, which admits main alone.
+  publish:
+    needs: [plan, build]
+    runs-on: [self-hosted, macOS, ARM64, lehr-image-build]
+    timeout-minutes: 20
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    env:
+      APP: ${{ inputs.app }}
+      CATALOG: ${{ inputs.catalog }}
+      AS: ${{ inputs.as }}
+      BUILD_DIR: ${{ github.workspace }}/../../release-build/${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: an empty workspace (nothing of the build's, its .git included)
+        run: |
+          set -eu
+          find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0, pinned: it runs on the Mac
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: a clean tree, and HEAD's own tool out of git
+        run: |
+          set -eu
+          if [ -n "$(git status --porcelain --ignored)" ]; then
+            git status --porcelain --ignored | head -20
+            echo "::error::the checkout isn't clean; nothing is published"
+            exit 1
+          fi
+          git show HEAD:tools/release.py > "$RUNNER_TEMP/release.py"
+      - name: the registry login, into this job's own folder
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          HUB_USER: ${{ needs.plan.outputs.user }}
+        run: |
+          set -eu
+          [ -n "$DOCKERHUB_TOKEN" ] || { echo "::error::no DOCKERHUB_TOKEN secret in the environment"; exit 1; }
+          mkdir -p "$RUNNER_TEMP/auth" && chmod 700 "$RUNNER_TEMP/auth"
+          # skopeo checks the login with Docker Hub here, so a rejected token stops
+          # the job now, in plain words, not as a 401 halfway through a push.
+          if ! out=$(printf '%s' "$DOCKERHUB_TOKEN" | skopeo login --authfile "$RUNNER_TEMP/auth/config.json" \
+              --username "$HUB_USER" --password-stdin docker.io 2>&1); then
+            case $out in
+              *"invalid username/password"*|*unauthorized*|*denied*)
+                echo "::error::Docker Hub refused DOCKERHUB_TOKEN for $HUB_USER. The token may have rotated or been revoked: set the environment's secret again (gh secret set DOCKERHUB_TOKEN --env <environment> -R $GITHUB_REPOSITORY), or switch to a token made for this job."
+                ;;
+              *)
+                echo "::error::Docker Hub's login for $HUB_USER failed, and not because of the token: $out"
+                ;;
+            esac
+            exit 1
+          fi
+          # cosign looks Docker Hub up under another key (https://index.docker.io/v1/),
+          # so it gets its own entry in the same file. It doesn't ask Docker Hub:
+          # skopeo's check above is the one that does.
+          printf '%s' "$DOCKERHUB_TOKEN" | DOCKER_CONFIG="$RUNNER_TEMP/auth" \
+            cosign login docker.io --username "$HUB_USER" --password-stdin >/dev/null 2>&1 \
+            || { echo "::error::cosign couldn't write its Docker Hub login"; exit 1; }
+          echo "LOGIN | docker.io | $HUB_USER"
+      - name: the release (HEAD's tools/release.py), signed with the catalog's key
+        env:
+          SIGNING_KEY: ${{ secrets.CHANNEL_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.CHANNEL_KEY_PASSWORD }}
+        run: |
+          set -eu
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          args=(--catalog "$CATALOG")
+          [ -z "$AS" ] || args+=(--as "$AS")
+          REGISTRY_AUTH_FILE="$RUNNER_TEMP/auth/config.json" \
+            python3 -I "$RUNNER_TEMP/release.py" "apps/$APP" "${args[@]}" --from "$BUILD_DIR" --commit \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: push the release commit and its tag to main
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          tag=$(git describe --exact-match --tags HEAD)
+          # The token reaches git in its environment for this one push, never
+          # on disk or in argv. No hooks: the workspace outlives the job.
+          GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64)" \
+            git -c core.hooksPath=/dev/null push --atomic origin HEAD:refs/heads/main "refs/tags/$tag"
+          # Both or neither. If main moved meanwhile this is refused: the next
+          # push's or dispatch's run releases what this one didn't.
+          echo "RELEASED | $tag | $(git rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: the login and the build removed, whatever happened
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/auth" "$RUNNER_TEMP/release.py" "$BUILD_DIR" || true

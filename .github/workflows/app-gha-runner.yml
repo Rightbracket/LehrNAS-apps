@@ -1,4 +1,6 @@
-# The GitHub runner app, only when its folder or the tools change.
+# The GitHub runner app: its CI when its folder, the tools or the shared
+# workflows change, and on main its release, built and signed on our own
+# runner (app.yml and release.yml; LehrNAS #268, spec-runner-app.md §18.8).
 name: app-gha-runner
 on:
   push:
@@ -6,19 +8,35 @@ on:
       - apps/gha-runner/**
       - tools/**
       - .github/workflows/app-gha-runner.yml
+      - .github/workflows/app.yml
+      - .github/workflows/release.yml
+  # A rebuild by hand, from main alone (release.yml's plan refuses another
+  # branch): it takes the base image's and the packages' updates.
+  workflow_dispatch:
+permissions:
+  contents: read
 jobs:
-  gha-runner:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: apps/gha-runner/src/broker
-    steps:
-      - uses: actions/checkout@v4
-      # rustup reads rust-toolchain.toml; clippy and rustfmt come with it.
-      - run: rustup component add clippy rustfmt
-      - run: cargo fmt --check
-      - run: cargo clippy --locked --all-targets -- -D warnings
-      - run: cargo test --locked
-      - name: the runner's start script
-        working-directory: .
-        run: apps/gha-runner/tests/smoke.sh
+  ci:
+    uses: ./.github/workflows/app.yml
+    with:
+      app: gha-runner
+      rust: src/broker
+      tests: tests/smoke.sh
+  # In this repository alone, so a copy of it never runs the official release.
+  # A push releases only when the app or the tool changed since its last tag.
+  release:
+    needs: ci
+    if: github.repository == 'Rightbracket/LehrNAS-apps' && github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/release.yml
+    permissions:
+      contents: write
+      actions: read
+      deployments: read
+    with:
+      app: gha-runner
+      catalog: official.toml
+      environment: app-channel
+    secrets:
+      CHANNEL_KEY: ${{ secrets.CHANNEL_KEY }}
+      CHANNEL_KEY_PASSWORD: ${{ secrets.CHANNEL_KEY_PASSWORD }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}

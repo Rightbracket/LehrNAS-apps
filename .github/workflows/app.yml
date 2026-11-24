@@ -1,0 +1,107 @@
+# An app's own CI, called by the app's workflow (`app-<id>.yml`), which owns
+# the triggers: a push that changes the app's folder or tools/ (LehrNAS #268).
+# Each app stands alone, with its own language and lockfile, so the caller
+# names what to run: its Rust crates and its test scripts. Nothing here holds
+# a secret or writes to the repository.
+#
+#   jobs:
+#     ci:
+#       uses: ./.github/workflows/app.yml
+#       with:
+#         app: <id>             # the folder apps/<id>
+#         rust: src/broker      # crates under it, one a line (optional)
+#         tests: tests/smoke.sh # scripts under it, one a line (optional)
+name: app
+on:
+  workflow_call:
+    inputs:
+      app:
+        description: the app's id, its folder under apps/
+        type: string
+        required: true
+      rust:
+        description: >-
+          the app's Rust crates, folders under apps/<app>, one a line; each gets
+          cargo fmt --check, clippy with warnings denied and its tests, all --locked
+        type: string
+        default: ""
+      tests:
+        description: the app's test scripts under apps/<app>, one a line, run from the repository's root
+        type: string
+        default: ""
+permissions:
+  contents: read
+jobs:
+  app:
+    name: ${{ inputs.app }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    # Inputs reach the scripts as variables, never pasted into them.
+    env:
+      APP: ${{ inputs.app }}
+      RUST: ${{ inputs.rust }}
+      TESTS: ${{ inputs.tests }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: the app's folder, and every path the caller names in it
+        run: |
+          set -eu
+          if ! [[ $APP =~ ^[a-z0-9]+([._-][a-z0-9]+)*$ ]]; then
+            echo "::error::app '$APP' isn't an app's id"; exit 1
+          fi
+          [ -f "apps/$APP/entry.toml" ] || { echo "::error::no apps/$APP/entry.toml"; exit 1; }
+          bad=0
+          while IFS= read -r p; do
+            [ -n "$p" ] || continue
+            if ! [[ $p =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]] || [[ /$p/ == */../* || /$p/ == */./* ]]; then
+              echo "::error::'$p' isn't a path inside apps/$APP"; bad=1
+            elif [ ! -e "apps/$APP/$p" ]; then
+              echo "::error::no apps/$APP/$p"; bad=1
+            fi
+          done <<< "$RUST"$'\n'"$TESTS"
+          exit "$bad"
+      # rustup reads each crate's rust-toolchain.toml from the folder it runs
+      # in, so every cargo step runs in the crate's own folder.
+      - name: "rust: the toolchain, with clippy and rustfmt"
+        if: inputs.rust != ''
+        run: |
+          set -eu
+          while IFS= read -r c; do
+            [ -n "$c" ] || continue
+            (cd "apps/$APP/$c" && rustup component add clippy rustfmt)
+          done <<< "$RUST"
+      - name: "rust: cargo fmt --check"
+        if: inputs.rust != ''
+        run: |
+          set -eu
+          while IFS= read -r c; do
+            [ -n "$c" ] || continue
+            echo "::group::$c"; (cd "apps/$APP/$c" && cargo fmt --check); echo "::endgroup::"
+          done <<< "$RUST"
+      - name: "rust: cargo clippy, warnings denied"
+        if: inputs.rust != ''
+        run: |
+          set -eu
+          while IFS= read -r c; do
+            [ -n "$c" ] || continue
+            echo "::group::$c"; (cd "apps/$APP/$c" && cargo clippy --locked --all-targets -- -D warnings); echo "::endgroup::"
+          done <<< "$RUST"
+      - name: "rust: cargo test"
+        if: inputs.rust != ''
+        run: |
+          set -eu
+          while IFS= read -r c; do
+            [ -n "$c" ] || continue
+            echo "::group::$c"; (cd "apps/$APP/$c" && cargo test --locked); echo "::endgroup::"
+          done <<< "$RUST"
+      - name: the app's test scripts
+        if: inputs.tests != ''
+        run: |
+          set -eu
+          while IFS= read -r t; do
+            [ -n "$t" ] || continue
+            echo "::group::$t"; "apps/$APP/$t"; echo "::endgroup::"
+          done <<< "$TESTS"
