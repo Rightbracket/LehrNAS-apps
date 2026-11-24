@@ -20,17 +20,18 @@
 # them: its job has no environment. The publish job names the environment and
 # reads CHANNEL_KEY, CHANNEL_KEY_PASSWORD and DOCKERHUB_TOKEN from it, which
 # GitHub allows only when the caller says `secrets: inherit` (without it the
-# job saw none of them). LehrNAS-apps has no repository or organisation
-# secrets, so inherit hands over nothing else. This workflow declares no
+# job saw none of them). inherit also hands every job here the repository's
+# and the organisation's secrets, the build's too, so the plan refuses a run
+# that sees any: a key there would be readable from any branch, and would
+# stand in for a missing environment secret. This workflow declares no
 # secrets: a declared one the caller doesn't pass hides the environment's
-# (see below). The plan job
-# refuses a release without an environment, and one that doesn't exist or
-# admits any other branch, before the publish job could reach it: a run that
-# names a missing environment makes one, with no rules. The publish refuses an
-# empty secret.
+# (see below). The plan job also refuses a release without an environment,
+# and one that doesn't exist or admits any other branch, before the publish
+# job could reach it: a run that names a missing environment makes one, with
+# no rules. The publish refuses an empty secret before it logs in.
 #
-# What runs where: the plan on a hosted runner (git and GitHub's API, no
-# secret); the build and the publish on the Mac's `lehr-image-build` runner,
+# What runs where: the plan on a hosted runner (git and GitHub's API; it
+# reads its secrets context's names, never a value); the build and the publish on the Mac's `lehr-image-build` runner,
 # where every piece of third-party build code runs in BuildKit, in colima's VM
 # (#821), and the Mac runs only our tools.
 name: release
@@ -63,8 +64,9 @@ on:
 permissions:
   contents: read
 jobs:
-  # What would be released, on a hosted runner with no secret: the inputs
-  # checked, the environment's rule checked, and whether anything changed.
+  # What would be released, on a hosted runner with no environment: no
+  # secret but the job's token, the inputs checked, the environment's rule
+  # checked, and whether anything changed.
   plan:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
@@ -86,6 +88,32 @@ jobs:
       release: ${{ steps.changed.outputs.release }}
       user: ${{ steps.names.outputs.user }}
     steps:
+      # This job has no environment, so its secrets context is exactly what
+      # the caller's `secrets: inherit` hands every job of this workflow: the
+      # repository's and the organisation's secrets. There must be none but
+      # the job's own token. The key and the login live in the environment
+      # alone, which main alone can read; one on the repository is readable
+      # from any branch, fills in for a missing environment secret of its
+      # name, and reaches the build, which runs third-party code. The JSON
+      # goes through env, never into the script, and only names are printed
+      # (GitHub masks the values in the log anyway).
+      - name: no secret but the environment's
+        env:
+          INHERITED: ${{ toJSON(secrets) }}
+        run: |
+          set -eu
+          python3 -I - <<'PY'
+          import json, os, sys
+          names = sorted(n for n in json.loads(os.environ.pop("INHERITED")) if n.lower() != "github_token")
+          if names:
+              print(f"::error::the repository or its organisation holds secrets, which `secrets: inherit` hands to "
+                    f"every job of the release, the build's too: {', '.join(names)}. The release's secrets belong in "
+                    f"the environment alone (gh secret set NAME --env <environment>); a repository admin removes "
+                    f"these (gh secret delete NAME -R <repository>, or the organisation's settings), and nothing "
+                    f"is released before then", file=sys.stderr)
+              sys.exit(1)
+          print("SECRETS | none inherited but the job's token")
+          PY
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
@@ -181,7 +209,7 @@ jobs:
           echo "PLAN | $ID | release=$release | $why" | tee -a "$GITHUB_STEP_SUMMARY"
 
   # The build: the tool's tests, then buildx, with no secret in the job at
-  # all. Every piece of third-party build code (the crates' build scripts and
+  # all (no environment, and the plan refused any inherited one). Every piece of third-party build code (the crates' build scripts and
   # proc macros, the image's RUN steps) runs in BuildKit, in colima's VM: the
   # Dockerfile's first stage builds the broker (#821, §18.8). On this Mac the
   # job runs only our tools, and no cargo or rustc.
@@ -306,13 +334,31 @@ jobs:
             exit 1
           fi
           git show HEAD:tools/release.py > "$RUNNER_TEMP/release.py"
+      # All three, before anything uses one: the plan has refused any of
+      # these names on the repository or the organisation, so a value here is
+      # the environment's.
+      - name: the environment's secrets, all three
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          SIGNING_KEY: ${{ secrets.CHANNEL_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.CHANNEL_KEY_PASSWORD }}
+        run: |
+          set -eu
+          missing=()
+          [ -n "$DOCKERHUB_TOKEN" ] || missing+=(DOCKERHUB_TOKEN)
+          [ -n "$SIGNING_KEY" ] || missing+=(CHANNEL_KEY)
+          [ -n "$COSIGN_PASSWORD" ] || missing+=(CHANNEL_KEY_PASSWORD)
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::no ${missing[*]} secret in the environment $ENVIRONMENT; nothing is published"
+            exit 1
+          fi
+          echo "SECRETS | $ENVIRONMENT | all three"
       - name: the registry login, into this job's own folder
         env:
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
           HUB_USER: ${{ needs.plan.outputs.user }}
         run: |
           set -eu
-          [ -n "$DOCKERHUB_TOKEN" ] || { echo "::error::no DOCKERHUB_TOKEN secret in the environment $ENVIRONMENT"; exit 1; }
           mkdir -p "$RUNNER_TEMP/auth" && chmod 700 "$RUNNER_TEMP/auth"
           # skopeo checks the login with Docker Hub here, so a rejected token stops
           # the job now, in plain words, not as a 401 halfway through a push.
@@ -341,8 +387,6 @@ jobs:
           COSIGN_PASSWORD: ${{ secrets.CHANNEL_KEY_PASSWORD }}
         run: |
           set -eu
-          [ -n "$SIGNING_KEY" ] || { echo "::error::no CHANNEL_KEY secret in the environment $ENVIRONMENT"; exit 1; }
-          [ -n "$COSIGN_PASSWORD" ] || { echo "::error::no CHANNEL_KEY_PASSWORD secret in the environment $ENVIRONMENT"; exit 1; }
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           args=(--catalog "$CATALOG")

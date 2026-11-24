@@ -38,7 +38,8 @@ jobs:
       # The key, its password and the Docker Hub token are app-channel's,
       # which admits main alone; release.yml's publish job reads them there.
       # This job has no environment to pass them from; `inherit` is what
-      # lets the called job read its environment's. The repository has no
-      # other secrets, so it hands over nothing else.
+      # lets the called job read its environment's. It would also hand over
+      # any repository or organisation secret, so release.yml's plan refuses
+      # the run while there is one.
       environment: app-channel
     secrets: inherit
