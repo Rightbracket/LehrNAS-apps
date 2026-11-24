@@ -42,10 +42,11 @@ image (`eshork/<id>`) and its tags (`<id>-<version>`).
      one a line: `cargo fmt --check`, clippy with warnings denied and the tests, all
      `--locked`) and its test scripts (`tests:`, one a line, run from the root).
    - **`release.yml`, its release, after the CI and on `main` alone:** `app`,
-     `catalog: official.toml` and `environment: app-channel`, and no secrets: the
-     caller's job has no environment, so it can't pass app-channel's, and the
-     release's publish job reads them there itself. The job's `if` names this
-     repository, so a copy never runs it.
+     `catalog: official.toml` and `environment: app-channel`, and `secrets: inherit`.
+     The caller's job has no environment, so it can't pass app-channel's secrets;
+     the release's publish job reads them there itself, which GitHub allows only
+     with `inherit`. The repository has no other secrets, so it hands over nothing
+     else. The job's `if` names this repository, so a copy never runs it.
 
    `app-gha-runner.yml` is the example.
 4. The release builds the image on our own runner (`lehr-image-build`), signs it with
