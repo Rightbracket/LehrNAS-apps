@@ -8,6 +8,7 @@
 #       needs: ci
 #       if: github.ref == 'refs/heads/main'
 #       uses: ./.github/workflows/release.yml
+#       concurrency: {group: release-<id>, cancel-in-progress: false, queue: max}
 #       permissions: {contents: write, actions: read, deployments: read}
 #       with:
 #         app: <id>
@@ -288,14 +289,14 @@ jobs:
   # outlives the build job: the runner ends its orphans at the job's end.
   # The secrets come from the environment, which admits main alone.
   #
-  # One publish at a time in the repository: each checks that its tag isn't
-  # on the registry yet, pushes and signs, and pushes a catalog commit to main,
-  # so two at once could race on a tag or refuse each other's push. Only this
-  # job joins the group, never a plan that releases nothing or a build (the
-  # one image-build runner takes one job at a time anyway). GitHub keeps one
-  # publish waiting behind the running one; a third that arrives cancels the
-  # waiting one, which then shows as cancelled: its change is released by the
-  # next push that touches the app, or by a dispatch.
+  # One publish at a time in the repository: each pushes a catalog commit to
+  # main, so two apps' publishes at once would refuse each other's push. Only
+  # this job joins the group, never a plan that releases nothing or a build.
+  # `queue: max` keeps up to 100 publishes waiting, in the order they began
+  # to wait; the default (`single`) keeps one and cancels it when a third
+  # arrives. Two releases of one app are kept apart by the caller's own
+  # group, which holds a whole release run: the build picks the tag, so two
+  # builds of one app before either publish would pick the same one.
   publish:
     needs: [plan, build]
     runs-on: [self-hosted, macOS, ARM64, lehr-image-build]
@@ -304,6 +305,7 @@ jobs:
     concurrency:
       group: app-release-publish
       cancel-in-progress: false
+      queue: max
     permissions:
       contents: write
     defaults:
