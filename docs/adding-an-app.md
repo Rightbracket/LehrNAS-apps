@@ -45,8 +45,9 @@ image (`eshork/<id>`) and its tags (`<id>-<version>`).
      `catalog: official.toml` and `environment: app-channel`, and `secrets: inherit`.
      The caller's job has no environment, so it can't pass app-channel's secrets;
      the release's publish job reads them there itself, which GitHub allows only
-     with `inherit`. The repository has no other secrets, so it hands over nothing
-     else. The job's `if` names this repository, so a copy never runs it.
+     with `inherit`. inherit would also hand every job the repository's and the
+     organisation's secrets, so the release refuses a run that has any. The job's
+     `if` names this repository, so a copy never runs it.
 
    `app-gha-runner.yml` is the example.
 4. The release builds the image on our own runner (`lehr-image-build`), signs it with
@@ -56,8 +57,10 @@ image (`eshork/<id>`) and its tags (`<id>-<version>`).
    last tag; a dispatch always does, which takes the base image's updates.
    - **The key and the Docker Hub token** are secrets of the `app-channel`
      environment (`CHANNEL_KEY`, `CHANNEL_KEY_PASSWORD`, `DOCKERHUB_TOKEN`), which
-     admits `main` alone. The release refuses to start without that rule, and the
-     publish refuses an empty secret, so only `main` can release.
+     admits `main` alone. The release refuses to start without that rule, or while
+     the repository or the organisation holds any secret, and the publish refuses an
+     empty one, so only `main` can release. Set them with `--env app-channel`,
+     never as repository secrets.
    - **One publish at a time** in the repository: each checks its tag on the
      registry and commits a catalog to `main`. Only the publish job waits its turn;
      a plan that releases nothing never does. GitHub keeps one publish waiting
