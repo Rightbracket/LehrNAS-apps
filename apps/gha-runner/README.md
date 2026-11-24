@@ -104,9 +104,11 @@ python3 tools/check_template.py
 
 A release is a push to `main` that changes this folder or `tools/release.py`, or
 a dispatch of `app-gha-runner.yml`: `release.yml` builds, signs and commits it on
-our own runner (`docs/adding-an-app.md`). Nothing is released by hand: a release
-by hand alongside a push's run would pick the same day's tag, and one of the two
-would be refused.
+our own runner (`docs/adding-an-app.md`), and every official publish waits for
+the owner's approval in the run. Once the workflow has released the runner, nothing
+is released by hand: a release by hand alongside a push's run would pick the same
+day's tag, and one of the two would be refused. Until then, LehrNAS's `lehrdev
+runner release` is the way by hand.
 
 The image is built from this folder, `-f image/Dockerfile`; its first stage
 builds the broker for both architectures, so building it needs no Rust here:

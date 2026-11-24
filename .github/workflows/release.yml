@@ -291,9 +291,11 @@ jobs:
         run: |
           set -eu
           # A run cancelled, or a runner lost, between its build and its
-          # publish leaves the build behind: anything older than a day goes.
+          # publish leaves the build behind. A build may also wait for its
+          # publish's approval (LehrNAS #875), which GitHub holds for up to 30
+          # days, so only builds older than that go.
           mkdir -p "$(dirname "$BUILD_DIR")"
-          find "$(dirname "$BUILD_DIR")" -mindepth 1 -maxdepth 1 -mtime +0 -exec rm -rf {} +
+          find "$(dirname "$BUILD_DIR")" -mindepth 1 -maxdepth 1 -mtime +30 -exec rm -rf {} +
           rm -rf "$BUILD_DIR"
           args=(--catalog "$CATALOG")
           [ -z "$AS" ] || args+=(--as "$AS")
@@ -359,6 +361,24 @@ jobs:
             exit 1
           fi
           git show HEAD:tools/release.py > "$RUNNER_TEMP/release.py"
+      # Before anything is pushed or signed: the catalog commit goes on this
+      # run's commit, so if main has moved since (another push or release
+      # landed while this one waited for its approval, its build or the
+      # runner), the push would be refused after the image was signed. So it
+      # stops here, with nothing pushed; a dispatch from main releases it.
+      - name: main is still this run's commit
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          head=$(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64)" \
+            git -c core.hooksPath=/dev/null ls-remote origin refs/heads/main | cut -f1)
+          if [ "$head" != "$GITHUB_SHA" ]; then
+            echo "::error::main is at ${head:-nothing}, not this run's $GITHUB_SHA: another push or release landed while this one waited. Nothing was pushed or signed; dispatch the release from main to release what this run would have"
+            exit 1
+          fi
+          echo "MAIN | $GITHUB_SHA | unmoved"
       # All three, before anything uses one: the plan has refused any of
       # these names on the repository or the organisation, so a value here is
       # the environment's.

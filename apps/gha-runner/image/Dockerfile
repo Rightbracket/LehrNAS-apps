@@ -5,10 +5,10 @@
 # docker client and Kubernetes hooks this app doesn't want. The base, the Rust
 # image and the tarballs are pinned, so one version builds one thing.
 #
-# Build it from the app's folder, not this one (image/Dockerfile.dockerignore
-# lets in only what it copies):
+# Build it from the repository's root, with the app's folder as the context
+# (image/Dockerfile.dockerignore lets in only what it copies):
 #
-#   docker buildx build -f image/Dockerfile --platform linux/amd64,linux/arm64 \
+#   docker buildx build -f apps/gha-runner/image/Dockerfile --platform linux/amd64,linux/arm64 \
 #     --build-arg APP_RELEASE=<tag> apps/gha-runner
 
 # The broker, static for both architectures, built here rather than on the
