@@ -106,11 +106,13 @@ jobs:
           import json, os, sys
           names = sorted(n for n in json.loads(os.environ.pop("INHERITED")) if n.lower() != "github_token")
           if names:
-              print(f"::error::the repository or its organisation holds secrets, which `secrets: inherit` hands to "
-                    f"every job of the release, the build's too: {', '.join(names)}. The release's secrets belong in "
-                    f"the environment alone (gh secret set NAME --env <environment>); a repository admin removes "
-                    f"these (gh secret delete NAME -R <repository>, or the organisation's settings), and nothing "
-                    f"is released before then", file=sys.stderr)
+              repo, env = os.environ["GITHUB_REPOSITORY"], os.environ["ENVIRONMENT"]
+              print(f"::error::this repository can read secrets besides the environment's, which `secrets: inherit` "
+                    f"hands to every job of the release, the build's too: {', '.join(names)}. The release's secrets "
+                    f"belong in the environment alone (gh secret set NAME --env {env}). A repository secret is "
+                    f"deleted (gh secret delete NAME -R {repo}); an organisation's is never deleted, since other "
+                    f"repositories may use it: take this repository off its access list. Nothing is released "
+                    f"before then; LehrNAS's lehrdev runner release-secrets names each one", file=sys.stderr)
               sys.exit(1)
           print("SECRETS | none inherited but the job's token")
           PY
@@ -373,7 +375,7 @@ jobs:
               --username "$HUB_USER" --password-stdin docker.io 2>&1); then
             case $out in
               *"invalid username/password"*|*unauthorized*|*denied*)
-                echo "::error::Docker Hub refused DOCKERHUB_TOKEN for $HUB_USER. The token may have rotated or been revoked: set the environment's secret again (gh secret set DOCKERHUB_TOKEN --env <environment> -R $GITHUB_REPOSITORY), or switch to a token made for this job."
+                echo "::error::Docker Hub refused DOCKERHUB_TOKEN for $HUB_USER. The token may have rotated or been revoked: set the environment's secret again (gh secret set DOCKERHUB_TOKEN --env $ENVIRONMENT -R $GITHUB_REPOSITORY), or switch to a token made for this job."
                 ;;
               *)
                 echo "::error::Docker Hub's login for $HUB_USER failed, and not because of the token: $out"
