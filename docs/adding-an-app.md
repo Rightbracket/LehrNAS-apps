@@ -52,7 +52,9 @@ image (`eshork/<id>`) and its tags (`<id>-<version>`).
      queue: max}`.
 
    `app-gha-runner.yml` is the example.
-4. The release builds the image on our own runner (`lehr-image-build`), signs it with
+4. The release builds the image on our own runner (`lehr-image-build`), in the VM its
+   `.env` names (`LEHR_BUILD_ENGINE=lehr-build-apps`; the build refuses a runner that
+   names none or another), signs it with
    the app-channel key, writes the entry into `official.toml`, signs the file, and
    pushes that commit and its tag to `main`. Nothing writes that file by hand. A push
    releases only when the app's folder or `tools/release.py` changed since the app's
@@ -72,5 +74,5 @@ image (`eshork/<id>`) and its tags (`<id>-<version>`).
      waiting.
    - **An app needs a `src/broker` crate, for now:** `tools/release.py` reads the
      broker's name from `src/broker/Cargo.toml` to scan the image's binary
-     (`broker_name`, line 731), so an app without one fails there until LehrNAS
+     (`broker_name`), so an app without one fails there until LehrNAS
      #861 is fixed.
