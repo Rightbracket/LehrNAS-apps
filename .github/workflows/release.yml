@@ -17,7 +17,10 @@
 #       secrets: inherit
 #
 # The secrets live in the GitHub environment the caller names, never on the
-# repository, and that environment admits main alone. The publish job names
+# repository, and that environment admits main alone. The official one also
+# has the owner as its required reviewer, so every official publish waits for
+# the owner's approval (LehrNAS #875); the plan refuses an official release
+# without one. The test bed's has none, so its releases run unattended. The publish job names
 # the environment and reads CHANNEL_KEY, CHANNEL_KEY_PASSWORD and
 # DOCKERHUB_TOKEN from it. GitHub gives a called job an environment's secret
 # only for a name its caller passes, by name or all at once with `secrets:
@@ -157,6 +160,10 @@ jobs:
           print(f"user={parts[1]}")
           PY
           cat "$GITHUB_OUTPUT"
+      # The official repository's environment also needs a required
+      # reviewer, so every official publish waits for the owner's approval
+      # (LehrNAS #875); the test bed's has none, so its releases run
+      # unattended.
       - name: the environment exists and admits main alone
         env:
           GH_TOKEN: ${{ github.token }}
@@ -174,7 +181,8 @@ jobs:
             || { echo "::error::can't read $ENVIRONMENT's branch rule ($rules)"; exit 1; }
           ENV_JSON=$env_json RULES=$rules python3 -I - <<'PY'
           import json, os, sys
-          policy = json.loads(os.environ["ENV_JSON"]).get("deployment_branch_policy")
+          envj = json.loads(os.environ["ENV_JSON"])
+          policy = envj.get("deployment_branch_policy")
           rules = [(r.get("type"), r.get("name")) for r in json.loads(os.environ["RULES"]).get("branch_policies", [])]
           env = os.environ["ENVIRONMENT"]
           if not policy or policy.get("protected_branches") or not policy.get("custom_branch_policies") \
@@ -182,7 +190,14 @@ jobs:
               print(f"::error::the environment {env} must admit the branch main alone (its rule: {policy}, {rules}); "
                     "nothing is released until it does", file=sys.stderr)
               sys.exit(1)
-          print(f"ENVIRONMENT | {env} | main alone")
+          reviewers = [r for rule in envj.get("protection_rules") or [] if rule.get("type") == "required_reviewers"
+                       for r in rule.get("reviewers") or []]
+          if os.environ["GITHUB_REPOSITORY"] == "Rightbracket/LehrNAS-apps" and not reviewers:
+              print(f"::error::the official environment {env} has no required reviewer: every official publish "
+                    "waits for the owner's approval (LehrNAS #875); LehrNAS's lehrdev runner release-secrets adds "
+                    "the owner. Nothing is released until it has one", file=sys.stderr)
+              sys.exit(1)
+          print(f"ENVIRONMENT | {env} | main alone" + (f", {len(reviewers)} required reviewer(s)" if reviewers else ""))
           PY
       # A push releases only what changed since the release's last tag: the
       # app's folder, the tool or the identity. A dispatch always releases
