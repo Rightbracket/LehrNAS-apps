@@ -11,7 +11,7 @@ The official LehrNAS app catalog, and the code of the official apps.
 | `official.toml.sig` | The app-channel key's signature over the file's bytes (`cosign sign-blob`) |
 | `app-channel.pub` | The key's public half. Every LehrNAS box ships the same bytes and verifies the catalog with them before reading a single entry |
 | `apps/<id>/` | One official app, standing alone: its entry, image, code and tests |
-| `tools/` | `check.py` checks a catalog by the box's rules; `check_template.py` checks every app's entry |
+| `tools/` | `check.py` checks a catalog by the box's rules; `check_template.py` checks every app's entry; `release.py` builds, signs and writes an app's release, run by `release.yml` (with its tests, `test_release.py`) |
 | `docs/` | [Publishing your own catalog](docs/publish-your-own-catalog.md) and [adding an app](docs/adding-an-app.md) |
 
 ## The apps

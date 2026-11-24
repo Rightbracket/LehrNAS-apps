@@ -25,7 +25,8 @@ image (`eshork/<id>`) and its tags (`<id>-<version>`).
 
 - **Each app stands alone:** its own language, lockfile and toolchain, with no
   repository-wide workspace. `shared/` appears only when two apps really share code.
-- **No binaries in git.** A build copies them in, and `.gitignore` keeps them out.
+- **No binaries in git.** An image builds its own binaries in a stage of its
+  Dockerfile, so nothing built is ever copied into the tree.
 - **A retired app loses its entry and its folder.** Its tags keep the code reachable.
 - **A new compose key goes by path.** A box parses inline compose while it reads the
   catalog, and an entry it can't parse refuses the whole file, for every app. Use
@@ -61,19 +62,23 @@ image (`eshork/<id>`) and its tags (`<id>-<version>`).
    the app-channel key, writes the entry into `official.toml`, signs the file, and
    pushes that commit and its tag to `main`. Nothing writes that file by hand. A push
    releases only when the app's folder or `tools/release.py` changed since the app's
-   last tag; a dispatch always does, which takes the base image's updates.
+   last tag; a dispatch always does, which takes the named apt packages' updates. The
+   base images are pinned by digest, so their updates come with a change to the
+   Dockerfile's digests, which a push then releases.
    - **The key and the Docker Hub token** are secrets of the `app-channel`
      environment (`CHANNEL_KEY`, `CHANNEL_KEY_PASSWORD`, `DOCKERHUB_TOKEN`), which
      admits `main` alone. The release refuses to start without that rule, or while
      this repository can read any repository or organisation secret, and the publish
-     refuses an empty one, so only `main` can release. `app-channel` also has the
-     owner as its required reviewer, and the release refuses to start without one:
-     every official publish waits for the owner to approve it in the run (LehrNAS
-     #875). Set them with `--env app-channel`,
-     never as repository secrets.
+     refuses an empty one, so only `main` can release. Set them with `--env
+     app-channel`, never as repository secrets.
+   - **Every official publish waits for the owner:** `app-channel` has the owner as
+     its required reviewer, and the release refuses to start without one, so each
+     publish waits for the owner to approve it in the run (LehrNAS #875).
    - **One release of an app at a time, none cancelled:** the build picks the tag and
-     bakes it into the image, so the app's group holds a whole release run, and two
-     builds of one app never pick the same tag. It says `queue: max`: up to 100 wait,
+     bakes it into the image, so the app's group is meant to hold a whole release run,
+     and two builds of one app to pick different tags. GitHub's pages don't say that
+     a caller job's group covers the jobs it calls, and no two runs have overlapped
+     yet; if it doesn't, the second publish is refused at its tag check. It says `queue: max`: up to 100 wait,
      about in the order they began waiting. Under GitHub's default a third arrival
      would cancel the one waiting.
    - **Two apps' releases can collide on `main`:** each publish commits its catalog
