@@ -6,7 +6,7 @@
 #   jobs:
 #     release:
 #       needs: ci
-#       if: github.ref == 'refs/heads/main'
+#       if: github.repository == 'Rightbracket/LehrNAS-apps' && github.ref == 'refs/heads/main'
 #       uses: ./.github/workflows/release.yml
 #       concurrency: {group: release-<id>, cancel-in-progress: false, queue: max}
 #       permissions: {contents: write, actions: read, deployments: read}
@@ -21,9 +21,9 @@
 # the environment and reads CHANNEL_KEY, CHANNEL_KEY_PASSWORD and
 # DOCKERHUB_TOKEN from it. GitHub gives a called job an environment's secret
 # only for a name its caller passes, by name or all at once with `secrets:
-# inherit`, even though the caller's job has no environment; this one passed
-# none and saw none (run 45459594837). The callers say inherit, which the
-# copy proved (run 45460468632). inherit also hands every job here the repository's
+# inherit`, even though the caller's job has no environment; one not passed
+# is empty. The callers say inherit, which the test bed's releases proved
+# (LehrNAS spec-runner-app §18.9). inherit also hands every job here the repository's
 # and the organisation's secrets, the build's too, so the plan refuses a run
 # that sees any: a key there would be readable from any branch, and would
 # stand in for a missing environment secret. This workflow declares no
@@ -60,7 +60,7 @@ on:
     # which needs none. The publish job reads CHANNEL_KEY, CHANNEL_KEY_PASSWORD
     # and DOCKERHUB_TOKEN from the environment it names. A secret the caller
     # doesn't pass is empty in every job, even one whose environment holds it
-    # (runs 45457934914, declared but not passed, and 45459594837, neither).
+    # (the test bed's runs, LehrNAS spec-runner-app §18.9).
 permissions:
   contents: read
 jobs:
@@ -114,7 +114,7 @@ jobs:
               sys.exit(1)
           print("SECRETS | none inherited but the job's token")
           PY
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -229,7 +229,7 @@ jobs:
       # empties: the publish job reads the archive and its record from here.
       BUILD_DIR: ${{ github.workspace }}/../../release-build/${{ github.run_id }}-${{ github.run_attempt }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0, pinned: it runs on the Mac
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, pinned: it runs on the Mac
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -245,11 +245,11 @@ jobs:
           # buildx builder is named after it too: a builder is bound to the
           # engine it was made on.
           engine=${LEHR_BUILD_ENGINE:-}
-          fix="run dev/ci-runner/image-build-runner.sh $GITHUB_REPOSITORY [<name>] again as gha-runner, which adds the line, then restart the runner"
-          [ -n "$engine" ] || { echo "::error::this runner's .env names no build VM (LEHR_BUILD_ENGINE); $fix"; exit 1; }
+          add="run LehrNAS's dev/ci-runner/image-build-runner.sh $GITHUB_REPOSITORY <its name, if any> again as gha-runner, which adds the line, then restart the runner"
+          [ -n "$engine" ] || { echo "::error::this runner's .env names no build VM (LEHR_BUILD_ENGINE); $add"; exit 1; }
           [[ $engine =~ ^lehr-build(-[a-z0-9]+)?$ ]] || { echo "::error::LEHR_BUILD_ENGINE '$engine' isn't lehr-build[-<name>]"; exit 1; }
           if [ "$GITHUB_REPOSITORY" = Rightbracket/LehrNAS-apps ] && [ "$engine" != lehr-build-apps ]; then
-            echo "::error::LehrNAS-apps builds in lehr-build-apps alone; this runner names '$engine'; $fix"; exit 1
+            echo "::error::LehrNAS-apps builds in lehr-build-apps alone; this runner's .env names '$engine': set LEHR_BUILD_ENGINE=lehr-build-apps there, then restart the runner"; exit 1
           fi
           if [ "$GITHUB_REPOSITORY" != Rightbracket/LehrNAS-apps ] && [ "$engine" = lehr-build-apps ]; then
             echo "::error::lehr-build-apps is LehrNAS-apps's build VM alone; this runner, for $GITHUB_REPOSITORY, names it"; exit 1
@@ -300,23 +300,17 @@ jobs:
   # outlives the build job: the runner ends its orphans at the job's end.
   # The secrets come from the environment, which admits main alone.
   #
-  # One publish at a time in the repository: each pushes a catalog commit to
-  # main, so two apps' publishes at once would refuse each other's push. Only
-  # this job joins the group, never a plan that releases nothing or a build.
-  # `queue: max` keeps up to 100 publishes waiting, in the order they began
-  # to wait; the default (`single`) keeps one and cancels it when a third
-  # arrives. Two releases of one app are kept apart by the caller's own
-  # group, which holds a whole release run: the build picks the tag, so two
-  # builds of one app before either publish would pick the same one.
+  # Two releases of one app are kept apart by the caller's own group, which
+  # holds a whole release run: the build picks the tag, so two builds of one
+  # app before either publish would pick the same one. Different apps need no
+  # group here: each publish commits on its own run's commit, so when another
+  # release has moved main first its push is refused whether the two ran
+  # together or in turn (see the push step).
   publish:
     needs: [plan, build]
     runs-on: [self-hosted, macOS, ARM64, lehr-image-build]
     timeout-minutes: 20
     environment: ${{ inputs.environment }}
-    concurrency:
-      group: app-release-publish
-      cancel-in-progress: false
-      queue: max
     permissions:
       contents: write
     defaults:
@@ -333,7 +327,7 @@ jobs:
         run: |
           set -eu
           find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0, pinned: it runs on the Mac
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, pinned: it runs on the Mac
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
@@ -418,8 +412,10 @@ jobs:
           GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
             GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64)" \
             git -c core.hooksPath=/dev/null push --atomic origin HEAD:refs/heads/main "refs/tags/$tag"
-          # Both or neither. If main moved meanwhile this is refused: the next
-          # push's or dispatch's run releases what this one didn't.
+          # Both or neither. If main moved since this run's commit (any push,
+          # another app's release included) git refuses it, and the image just
+          # signed is named by no catalog. A release's own push starts no run,
+          # so a dispatch releases the app again, under the next tag.
           echo "RELEASED | $tag | $(git rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: the login and the build removed, whatever happened
         if: always()
