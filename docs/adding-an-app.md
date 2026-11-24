@@ -42,8 +42,10 @@ image (`eshork/<id>`) and its tags (`<id>-<version>`).
      one a line: `cargo fmt --check`, clippy with warnings denied and the tests, all
      `--locked`) and its test scripts (`tests:`, one a line, run from the root).
    - **`release.yml`, its release, after the CI and on `main` alone:** `app`,
-     `catalog: official.toml`, `environment: app-channel`, and the three secrets
-     passed by name. The job's `if` names this repository, so a copy never runs it.
+     `catalog: official.toml` and `environment: app-channel`, and no secrets: the
+     caller's job has no environment, so it can't pass app-channel's, and the
+     release's publish job reads them there itself. The job's `if` names this
+     repository, so a copy never runs it.
 
    `app-gha-runner.yml` is the example.
 4. The release builds the image on our own runner (`lehr-image-build`), signs it with
@@ -53,6 +55,15 @@ image (`eshork/<id>`) and its tags (`<id>-<version>`).
    last tag; a dispatch always does, which takes the base image's updates.
    - **The key and the Docker Hub token** are secrets of the `app-channel`
      environment (`CHANNEL_KEY`, `CHANNEL_KEY_PASSWORD`, `DOCKERHUB_TOKEN`), which
-     admits `main` alone. The release refuses to start without that rule, so only
-     the holder of the key can release.
-   - **One release at a time** in the repository: each commits a catalog to `main`.
+     admits `main` alone. The release refuses to start without that rule, and the
+     publish refuses an empty secret, so only `main` can release.
+   - **One publish at a time** in the repository: each checks its tag on the
+     registry and commits a catalog to `main`. Only the publish job waits its turn;
+     a plan that releases nothing never does. GitHub keeps one publish waiting
+     behind the running one, and a third that arrives cancels the waiting one
+     (shown as cancelled): its change goes out with the next push that touches the
+     app, or a dispatch.
+   - **An app needs a `src/broker` crate, for now:** `tools/release.py` reads the
+     broker's name from `src/broker/Cargo.toml` to scan the image's binary
+     (`broker_name`, line 731), so an app without one fails there until LehrNAS
+     #861 is fixed.
