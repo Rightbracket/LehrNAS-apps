@@ -17,16 +17,17 @@
 #       secrets: inherit
 #
 # The secrets live in the GitHub environment the caller names, never on the
-# repository, and that environment admits main alone. The caller can't pass
-# them: its job has no environment. The publish job names the environment and
-# reads CHANNEL_KEY, CHANNEL_KEY_PASSWORD and DOCKERHUB_TOKEN from it, which
-# GitHub allows only when the caller says `secrets: inherit` (without it the
-# job saw none of them). inherit also hands every job here the repository's
+# repository, and that environment admits main alone. The publish job names
+# the environment and reads CHANNEL_KEY, CHANNEL_KEY_PASSWORD and
+# DOCKERHUB_TOKEN from it. GitHub gives a called job an environment's secret
+# only for a name its caller passes, by name or all at once with `secrets:
+# inherit`, even though the caller's job has no environment; this one passed
+# none and saw none (run 45459594837). The callers say inherit, which the
+# copy proved (run 45460468632). inherit also hands every job here the repository's
 # and the organisation's secrets, the build's too, so the plan refuses a run
 # that sees any: a key there would be readable from any branch, and would
 # stand in for a missing environment secret. This workflow declares no
-# secrets: a declared one the caller doesn't pass hides the environment's
-# (see below). The plan job also refuses a release without an environment,
+# secrets (see below). The plan job also refuses a release without an environment,
 # and one that doesn't exist or admits any other branch, before the publish
 # job could reach it: a run that names a missing environment makes one, with
 # no rules. The publish refuses an empty secret before it logs in.
@@ -55,13 +56,11 @@ on:
         description: the GitHub environment that holds the secrets, admitting main alone
         type: string
         required: true
-    # No secrets are declared, on purpose. The publish job reads CHANNEL_KEY,
-    # CHANNEL_KEY_PASSWORD and DOCKERHUB_TOKEN from the environment it names;
-    # the caller says `secrets: inherit`, which is what lets it (the copy's
-    # runs 45459594837, without, and 45460468632, with). A secret declared
-    # here that the caller doesn't pass is empty in every job, environment or
-    # not: it hides the environment's secret of the same name (run
-    # 45457934914).
+    # No secrets are declared, on purpose: the callers say `secrets: inherit`,
+    # which needs none. The publish job reads CHANNEL_KEY, CHANNEL_KEY_PASSWORD
+    # and DOCKERHUB_TOKEN from the environment it names. A secret the caller
+    # doesn't pass is empty in every job, even one whose environment holds it
+    # (runs 45457934914, declared but not passed, and 45459594837, neither).
 permissions:
   contents: read
 jobs:
