@@ -35,7 +35,24 @@ image (`eshork/<id>`) and its tags (`<id>-<version>`).
 
 1. Make the folder.
 2. Check the entry from the repository's root: `python3 tools/check_template.py`.
-3. Add `.github/workflows/app-<id>.yml`, which builds and tests the app when its folder
-   or `tools/` changes. `app-gha-runner.yml` is the example.
-4. The first release writes the entry into `official.toml` and signs the file. Nothing
-   writes that file by hand. Only the holder of the key can release.
+3. Add `.github/workflows/app-<id>.yml`, a thin caller of the two shared workflows.
+   It owns the triggers (a push that changes the app's folder, `tools/` or the shared
+   workflows, and a dispatch) and names what to run:
+   - **`app.yml`, the app's CI:** its Rust crates (`rust:`, folders under the app's,
+     one a line: `cargo fmt --check`, clippy with warnings denied and the tests, all
+     `--locked`) and its test scripts (`tests:`, one a line, run from the root).
+   - **`release.yml`, its release, after the CI and on `main` alone:** `app`,
+     `catalog: official.toml`, `environment: app-channel`, and the three secrets
+     passed by name. The job's `if` names this repository, so a copy never runs it.
+
+   `app-gha-runner.yml` is the example.
+4. The release builds the image on our own runner (`lehr-image-build`), signs it with
+   the app-channel key, writes the entry into `official.toml`, signs the file, and
+   pushes that commit and its tag to `main`. Nothing writes that file by hand. A push
+   releases only when the app's folder or `tools/release.py` changed since the app's
+   last tag; a dispatch always does, which takes the base image's updates.
+   - **The key and the Docker Hub token** are secrets of the `app-channel`
+     environment (`CHANNEL_KEY`, `CHANNEL_KEY_PASSWORD`, `DOCKERHUB_TOKEN`), which
+     admits `main` alone. The release refuses to start without that rule, so only
+     the holder of the key can release.
+   - **One release at a time** in the repository: each commits a catalog to `main`.
