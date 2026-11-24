@@ -239,10 +239,22 @@ jobs:
           # Each image-build runner has a VM of its own, named in the runner's
           # .env (LEHR_BUILD_ENGINE; dev/ci-runner/image-build-runner.sh in
           # LehrNAS), so one repository's builds never share a VM, or its build
-          # cache, with another's. The buildx builder is named after it too: a
-          # builder is bound to the engine it was made on.
-          engine=${LEHR_BUILD_ENGINE:-lehr-build}
-          [[ $engine =~ ^lehr-build(-[a-z0-9]+)*$ ]] || { echo "::error::LEHR_BUILD_ENGINE '$engine' isn't lehr-build[-<name>]"; exit 1; }
+          # cache, with another's. No default: a runner whose .env lost the
+          # line would otherwise build in another repository's VM. The official
+          # repository's is lehr-build-apps, and no other repository's is. The
+          # buildx builder is named after it too: a builder is bound to the
+          # engine it was made on.
+          engine=${LEHR_BUILD_ENGINE:-}
+          fix="run dev/ci-runner/image-build-runner.sh $GITHUB_REPOSITORY [<name>] again as gha-runner, which adds the line, then restart the runner"
+          [ -n "$engine" ] || { echo "::error::this runner's .env names no build VM (LEHR_BUILD_ENGINE); $fix"; exit 1; }
+          [[ $engine =~ ^lehr-build(-[a-z0-9]+)?$ ]] || { echo "::error::LEHR_BUILD_ENGINE '$engine' isn't lehr-build[-<name>]"; exit 1; }
+          if [ "$GITHUB_REPOSITORY" = Rightbracket/LehrNAS-apps ] && [ "$engine" != lehr-build-apps ]; then
+            echo "::error::LehrNAS-apps builds in lehr-build-apps alone; this runner names '$engine'; $fix"; exit 1
+          fi
+          if [ "$GITHUB_REPOSITORY" != Rightbracket/LehrNAS-apps ] && [ "$engine" = lehr-build-apps ]; then
+            echo "::error::lehr-build-apps is LehrNAS-apps's build VM alone; this runner, for $GITHUB_REPOSITORY, names it"; exit 1
+          fi
+          echo "ENGINE | $GITHUB_REPOSITORY | $engine"
           export COLIMA_PROFILE=$engine BUILDX_BUILDER=$engine
           { echo "COLIMA_PROFILE=$engine"; echo "BUILDX_BUILDER=$engine"; } >> "$GITHUB_ENV"
           # No mount of the account's home: the build context goes over the API.
