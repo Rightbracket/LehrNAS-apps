@@ -66,7 +66,10 @@ image (`eshork/<id>`) and its tags (`<id>-<version>`).
      environment (`CHANNEL_KEY`, `CHANNEL_KEY_PASSWORD`, `DOCKERHUB_TOKEN`), which
      admits `main` alone. The release refuses to start without that rule, or while
      this repository can read any repository or organisation secret, and the publish
-     refuses an empty one, so only `main` can release. Set them with `--env app-channel`,
+     refuses an empty one, so only `main` can release. `app-channel` also has the
+     owner as its required reviewer, and the release refuses to start without one:
+     every official publish waits for the owner to approve it in the run (LehrNAS
+     #875). Set them with `--env app-channel`,
      never as repository secrets.
    - **One release of an app at a time, none cancelled:** the build picks the tag and
      bakes it into the image, so the app's group holds a whole release run, and two
