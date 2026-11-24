@@ -13,14 +13,17 @@
 #         app: <id>
 #         catalog: official.toml
 #         environment: app-channel
+#       secrets: inherit
 #
 # The secrets live in the GitHub environment the caller names, never on the
-# repository, and that environment admits main alone. The caller passes none:
-# a caller's job has no environment, so it can't reach an environment's
-# secrets, and LehrNAS-apps has no others. The publish job names the
-# environment and reads CHANNEL_KEY, CHANNEL_KEY_PASSWORD and DOCKERHUB_TOKEN
-# from it; this workflow declares no secrets, since a declared one the
-# caller doesn't pass would hide the environment's (see below). The plan job
+# repository, and that environment admits main alone. The caller can't pass
+# them: its job has no environment. The publish job names the environment and
+# reads CHANNEL_KEY, CHANNEL_KEY_PASSWORD and DOCKERHUB_TOKEN from it, which
+# GitHub allows only when the caller says `secrets: inherit` (without it the
+# job saw none of them). LehrNAS-apps has no repository or organisation
+# secrets, so inherit hands over nothing else. This workflow declares no
+# secrets: a declared one the caller doesn't pass hides the environment's
+# (see below). The plan job
 # refuses a release without an environment, and one that doesn't exist or
 # admits any other branch, before the publish job could reach it: a run that
 # names a missing environment makes one, with no rules. The publish refuses an
@@ -51,10 +54,12 @@ on:
         type: string
         required: true
     # No secrets are declared, on purpose. The publish job reads CHANNEL_KEY,
-    # CHANNEL_KEY_PASSWORD and DOCKERHUB_TOKEN from the environment it names.
-    # A secret declared here that the caller doesn't pass is empty in every
-    # job, environment or not: it hides the environment's secret of the same
-    # name (the copy's run 45457934914 showed it).
+    # CHANNEL_KEY_PASSWORD and DOCKERHUB_TOKEN from the environment it names;
+    # the caller says `secrets: inherit`, which is what lets it (the copy's
+    # runs 45459594837, without, and 45460468632, with). A secret declared
+    # here that the caller doesn't pass is empty in every job, environment or
+    # not: it hides the environment's secret of the same name (run
+    # 45457934914).
 permissions:
   contents: read
 jobs:
