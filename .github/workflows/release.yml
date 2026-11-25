@@ -449,11 +449,15 @@ jobs:
           # on disk or in argv. No hooks: the workspace outlives the job.
           GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
             GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64)" \
-            git -c core.hooksPath=/dev/null push --atomic origin HEAD:refs/heads/main "refs/tags/$tag"
-          # Both or neither. If main moved since this run's commit (any push,
-          # another app's release included) git refuses it, and the image just
-          # signed is named by no catalog. A release's own push starts no run,
-          # so a dispatch releases the app again, under the next tag.
+            git -c core.hooksPath=/dev/null push --atomic \
+              --force-with-lease=refs/heads/main:"$GITHUB_SHA" \
+              origin HEAD:refs/heads/main "refs/tags/$tag"
+          # Both or neither. The lease is the run's commit: if main is anywhere
+          # else (a push, another app's release, or a rewind, which would let
+          # the release commit through as a fast-forward), git refuses both,
+          # and the image just signed is named by no catalog. A release's own
+          # push starts no run, so a dispatch releases the app again, under
+          # the next tag.
           echo "RELEASED | $tag | $(git rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: the login and the build removed, whatever happened
         if: always()
