@@ -73,10 +73,15 @@ image (`eshork/<id>`) and its tags (`<id>-<version>`).
      app-channel`, never as repository secrets.
    - **Every official publish waits for the owner:** `app-channel` has the owner as
      its required reviewer, and the release refuses to start without one, so each
-     publish waits for the owner to approve it in the run (LehrNAS #875). Approve the
-     newest waiting run: a publish whose run's commit is no longer `main` (another
-     push landed while it waited) stops before it pushes or signs anything, and a
-     dispatch from `main` releases it.
+     publish waits for the owner to approve it in the run (LehrNAS #875). A waiting
+     approval holds the app's group, so the app's later runs queue before their plan
+     and none asks until it's answered. When `main` has moved since the waiting run's
+     commit (another push landed while it waited), reject that run, or approve it: it
+     stops before it pushes or signs anything. The next queued run then builds and
+     asks; with none queued, a dispatch from `main` releases the change. The catalog
+     push leases `main` on the run's commit, so a `main` moved or rewound after that
+     check refuses the push too. Unanswered, an approval holds the app's releases
+     until GitHub drops it, after 30 days.
    - **One release of an app at a time, none cancelled:** the build picks the tag and
      bakes it into the image, so the app's group is meant to hold a whole release run,
      and two builds of one app to pick different tags. GitHub's pages don't say that
@@ -86,7 +91,8 @@ image (`eshork/<id>`) and its tags (`<id>-<version>`).
      would cancel the one waiting.
    - **Two apps' releases can collide on `main`:** each publish commits its catalog
      entry on its own run's commit, so one that finds `main` moved by another app's
-     release is refused, and its signed image waits for a dispatch (LehrNAS #874).
+     release is refused: it stops before it signs, and the change waits for a
+     dispatch (LehrNAS #874).
      With one app, nothing does yet.
    - **An app needs a `src/broker` crate, for now:** `tools/release.py` reads the
      broker's name from `src/broker/Cargo.toml` to scan the image's binary
