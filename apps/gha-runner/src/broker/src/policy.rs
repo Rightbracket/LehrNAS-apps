@@ -328,9 +328,7 @@ pub fn decide(r: &Round) -> Step {
         }
         // GitHub showed it busy not long ago: its job is taken to run on, even
         // when it has been asked to leave, since a job is never interrupted.
-        Some(RunnerSeen::Offline) if c.since_busy_secs.is_some_and(|s| s < LOST_RUNNER_SECS) => {
-            Step::Wait(Waiting::Running)
-        }
+        Some(RunnerSeen::Offline) if holds_a_job(&c) => Step::Wait(Waiting::Running),
         Some(RunnerSeen::Offline) => {
             if leave || c.offline_secs >= OFFLINE_GRACE_SECS {
                 Step::Remove
@@ -338,6 +336,18 @@ pub fn decide(r: &Round) -> Step {
                 Step::Wait(Waiting::Idle)
             }
         }
+    }
+}
+
+/// The runner's job is taken to be running: GitHub shows it busy, or shows
+/// it offline within `LOST_RUNNER_SECS` of its last busy answer (LehrNAS
+/// #978). Removal and a neighbour's IPC clean (§17.4) both go by this.
+#[must_use]
+pub fn holds_a_job(c: &Current) -> bool {
+    match c.seen {
+        Some(RunnerSeen::Busy) => true,
+        Some(RunnerSeen::Offline) => c.since_busy_secs.is_some_and(|s| s < LOST_RUNNER_SECS),
+        _ => false,
     }
 }
 

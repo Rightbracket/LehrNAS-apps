@@ -337,7 +337,7 @@ impl Engine {
             seen.get(&n)
                 .copied()
                 .flatten()
-                .is_some_and(|c| c.seen == Some(RunnerSeen::Busy))
+                .is_some_and(|c| policy::holds_a_job(&c))
         };
         let mut no_word = None;
         let mut steps = BTreeMap::new();
@@ -1008,6 +1008,21 @@ mod tests {
     }
 
     #[test]
+    fn a_runner_github_only_ever_shows_offline_goes_a_grace_after_registration() {
+        // What #978's fix doesn't cover: with no idle or busy answer, the
+        // broker can't tell a busy runner from a dead one, so it goes 5 minutes
+        // after its registration, as before.
+        let t = setup("onlyoffline");
+        t.e.round(100);
+        let last = 100 + policy::OFFLINE_GRACE_SECS - 1;
+        assert_eq!(
+            says(&t, RunnerSeen::Offline, last),
+            Step::Wait(Waiting::Idle)
+        );
+        assert_eq!(says(&t, RunnerSeen::Offline, last + 1), Step::Remove);
+    }
+
+    #[test]
     fn an_offline_answer_after_online_starts_the_grace_then() {
         let t = setup("offlinelater");
         t.e.round(100);
@@ -1378,6 +1393,30 @@ mod tests {
         assert_eq!(steps[&2], Step::Register, "2 goes on without waiting for 1");
         assert_eq!(registers(&t), 3);
         assert!(t.pod.log.lock().unwrap().iter().any(|l| l == "write 2"));
+    }
+
+    #[test]
+    fn a_neighbour_held_through_an_offline_answer_keeps_the_ipc() {
+        // LehrNAS #978 with two instances: 1's job runs while GitHub shows it
+        // offline, and 2's runner goes and the next registers. The pod's IPC
+        // must not be emptied under 1's job.
+        let t = two("heldipc");
+        t.e.steps(100);
+        let (a, b) = (id_of(&t, 1), id_of(&t, 2));
+        set(&t, a, RunnerSeen::Busy);
+        set(&t, b, RunnerSeen::Idle);
+        t.e.steps(110);
+        set(&t, a, RunnerSeen::Offline);
+        set(&t, b, RunnerSeen::Gone);
+        t.pod.log.lock().unwrap().clear();
+        let (steps, _) = t.e.steps(413);
+        assert_eq!(steps[&1], Step::Wait(Waiting::Running));
+        assert_eq!(steps[&2], Step::Forget);
+        let (steps, _) = t.e.steps(414);
+        assert_eq!(steps[&2], Step::Register);
+        let log = t.pod.log.lock().unwrap().clone();
+        assert!(!log.iter().any(|l| l == "clean"), "{log:?}");
+        assert!(log.iter().any(|l| l == "write 2"), "{log:?}");
     }
 
     #[test]
