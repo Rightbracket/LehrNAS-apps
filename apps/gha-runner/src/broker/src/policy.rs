@@ -6,6 +6,12 @@
 /// off GitHub. A runner that died (a crash, a power loss) would otherwise hold
 /// the one slot for the day GitHub takes to remove it.
 pub const OFFLINE_GRACE_SECS: u64 = 300;
+/// How long after GitHub last showed a runner busy the broker still takes its
+/// job to be running, whatever GitHub says in between. GitHub itself calls a
+/// silent runner's job lost after about 10 minutes (§9.4). On 2026-11-28 it
+/// showed busy runners offline mid-job, and the grace above, counted from
+/// registration, stopped their jobs (LehrNAS #978).
+pub const LOST_RUNNER_SECS: u64 = 600;
 /// The fork-approval value that asks for approval from every outside
 /// contributor: GitHub's strictest.
 pub const STRICTEST_FORK_APPROVAL: &str = "all_external_contributors";
@@ -208,6 +214,12 @@ pub struct Current {
     /// `None`: GitHub couldn't be asked this round.
     pub seen: Option<RunnerSeen>,
     pub written_secs_ago: u64,
+    /// How long GitHub has shown it offline without a break; 0 when it
+    /// doesn't now.
+    pub offline_secs: u64,
+    /// How long since GitHub last showed it busy (or refused to remove it for
+    /// its job); `None` when it never has.
+    pub since_busy_secs: Option<u64>,
     /// How long it has been busy, as far as the broker has seen.
     pub busy_secs: u64,
     pub stop_already_asked: bool,
@@ -314,8 +326,13 @@ pub fn decide(r: &Round) -> Step {
                 Step::Wait(Waiting::Idle)
             }
         }
+        // GitHub showed it busy not long ago: its job is taken to run on, even
+        // when it has been asked to leave, since a job is never interrupted.
+        Some(RunnerSeen::Offline) if c.since_busy_secs.is_some_and(|s| s < LOST_RUNNER_SECS) => {
+            Step::Wait(Waiting::Running)
+        }
         Some(RunnerSeen::Offline) => {
-            if leave || c.written_secs_ago >= OFFLINE_GRACE_SECS {
+            if leave || c.offline_secs >= OFFLINE_GRACE_SECS {
                 Step::Remove
             } else {
                 Step::Wait(Waiting::Idle)
@@ -338,6 +355,14 @@ pub fn no_word(c: &Current, reported: bool) -> Option<bool> {
         }
         _ => None,
     }
+}
+
+/// GitHub refused a DELETE because the runner is running a job: its 422 says
+/// "currently running a job". GitHub's word that the runner is busy, which a
+/// later round's offline must not override (LehrNAS #978).
+#[must_use]
+pub fn refused_for_its_job(error: &str) -> bool {
+    error.contains("answered 422") && error.contains("currently running a job")
 }
 
 /// `cache` empties when the admin asked or when it has grown past its cap.
@@ -491,6 +516,8 @@ mod tests {
             current: Some(Current {
                 seen: Some(seen),
                 written_secs_ago: 10,
+                offline_secs: 0,
+                since_busy_secs: None,
                 busy_secs: 0,
                 stop_already_asked: false,
             }),
@@ -770,8 +797,52 @@ mod tests {
     fn a_dead_runner_leaves_after_the_grace_a_new_one_gets_to_start() {
         let mut r = with(RunnerSeen::Offline);
         assert_eq!(decide(&r), Step::Wait(Waiting::Idle));
-        r.current.as_mut().unwrap().written_secs_ago = OFFLINE_GRACE_SECS;
+        r.current.as_mut().unwrap().offline_secs = OFFLINE_GRACE_SECS;
         assert_eq!(decide(&r), Step::Remove);
+    }
+
+    #[test]
+    fn the_offline_grace_counts_from_the_first_offline_answer_not_from_registration() {
+        // LehrNAS #978: registered 313 s ago, idle until now, offline this round.
+        let mut r = with(RunnerSeen::Offline);
+        let c = r.current.as_mut().unwrap();
+        c.written_secs_ago = 313;
+        c.offline_secs = 0;
+        assert_eq!(decide(&r), Step::Wait(Waiting::Idle));
+        r.current.as_mut().unwrap().offline_secs = OFFLINE_GRACE_SECS - 1;
+        assert_eq!(decide(&r), Step::Wait(Waiting::Idle));
+    }
+
+    #[test]
+    fn a_runner_github_showed_busy_keeps_its_job_through_offline_answers() {
+        // LehrNAS #978's sequence: registered, busy, then offline at 313 s.
+        let mut r = with(RunnerSeen::Offline);
+        let c = r.current.as_mut().unwrap();
+        c.written_secs_ago = 313;
+        c.offline_secs = OFFLINE_GRACE_SECS;
+        c.since_busy_secs = Some(30);
+        assert_eq!(decide(&r), Step::Wait(Waiting::Running));
+        // Asked to leave (Drain), it still finishes its job.
+        r.drain = true;
+        assert_eq!(decide(&r), Step::Wait(Waiting::Running));
+        // Silent past GitHub's own lost-runner time: dead, so it goes.
+        r.drain = false;
+        r.current.as_mut().unwrap().since_busy_secs = Some(LOST_RUNNER_SECS);
+        assert_eq!(decide(&r), Step::Remove);
+    }
+
+    #[test]
+    fn only_githubs_running_a_job_refusal_reads_as_busy() {
+        assert!(refused_for_its_job(
+            "GitHub answered 422 to DELETE orgs/acme/actions/runners/1493: Bad request - \
+             Runner lehrnas-0b6a1053 is currently running a job and cannot be deleted."
+        ));
+        assert!(!refused_for_its_job(
+            "GitHub answered 502 to DELETE repos/me/thing/actions/runners/52: Server Error"
+        ));
+        assert!(!refused_for_its_job(
+            "GitHub answered 422 to DELETE x: Validation failed"
+        ));
     }
 
     #[test]
@@ -869,6 +940,8 @@ mod tests {
         let c = |seen, written_secs_ago| Current {
             seen: Some(seen),
             written_secs_ago,
+            offline_secs: 0,
+            since_busy_secs: None,
             busy_secs: 0,
             stop_already_asked: false,
         };

@@ -36,6 +36,16 @@ pub struct Runner {
     pub written: u64,
     #[serde(default)]
     pub busy_since: Option<u64>,
+    /// The last round GitHub showed this runner busy, or refused to remove it
+    /// for running a job (LehrNAS #978). Changed in memory and saved with the
+    /// next change, so a busy runner's rounds write nothing.
+    #[serde(default)]
+    pub busy_last: Option<u64>,
+    /// When GitHub first showed this runner offline since it last showed it
+    /// online: the offline grace counts from here, not from registration
+    /// (LehrNAS #978). Kept like `busy_last`.
+    #[serde(default)]
+    pub offline_since: Option<u64>,
     #[serde(default)]
     pub job: Option<String>,
     #[serde(default)]

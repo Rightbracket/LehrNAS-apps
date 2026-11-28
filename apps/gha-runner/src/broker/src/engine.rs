@@ -239,18 +239,38 @@ impl Engine {
                 Some(all.get(&id).copied().unwrap_or(RunnerSeen::Gone))
             }
         };
-        let busy_since = {
+        let (busy_since, busy_last, offline_since) = {
             let mut g = self.shared.lock();
             let c = g.0.runners.get_mut(&n)?;
+            // `busy_last` and `offline_since` change in memory only: they go
+            // to disk with the next save, so a busy runner's rounds write
+            // nothing (LehrNAS #978).
+            match seen {
+                Some(RunnerSeen::Busy) => {
+                    c.busy_last = Some(now);
+                    c.offline_since = None;
+                }
+                Some(RunnerSeen::Idle) => c.offline_since = None,
+                Some(RunnerSeen::Offline) => {
+                    c.offline_since.get_or_insert(now);
+                }
+                Some(RunnerSeen::Gone) | None => {}
+            }
             if seen == Some(RunnerSeen::Busy) && c.busy_since.is_none() {
                 c.busy_since = Some(now);
                 let _ = self.shared.file.save(&g.0);
             }
-            g.0.runners.get(&n)?.busy_since
+            let c = g.0.runners.get(&n)?;
+            (c.busy_since, c.busy_last, c.offline_since)
         };
         Some(Current {
             seen,
             written_secs_ago: now.saturating_sub(written),
+            offline_secs: match seen {
+                Some(RunnerSeen::Offline) => offline_since.map_or(0, |o| now.saturating_sub(o)),
+                _ => 0,
+            },
+            since_busy_secs: busy_last.map(|b| now.saturating_sub(b)),
             busy_secs: busy_since.map_or(0, |b| now.saturating_sub(b)),
             stop_already_asked: stop_asked,
         })
@@ -441,7 +461,19 @@ impl Engine {
                     let g = self.shared.lock();
                     (self.scope.clone()?, g.0.runners.get(&n).map_or(0, |c| c.id))
                 };
-                self.github.remove(&scope, id)?;
+                if let Err(e) = self.github.remove(&scope, id) {
+                    // GitHub says it's running a job: that's its word that the
+                    // runner is busy, so no later round's offline stops it
+                    // (LehrNAS #978). The refusal still shows as a fault.
+                    if policy::refused_for_its_job(&e) {
+                        let mut g = self.shared.lock();
+                        if let Some(c) = g.0.runners.get_mut(&n) {
+                            c.busy_last = Some(now);
+                            c.offline_since = None;
+                        }
+                    }
+                    return Err(e);
+                }
                 // Its listener has no reason left to run, and one still
                 // retrying would never take the next config.
                 self.pod.stop_runner(n)
@@ -472,6 +504,9 @@ impl Engine {
                     id: reg.id,
                     name: reg.name.clone(),
                     written: now,
+                    // Not online yet: a runner that never comes online is
+                    // dead one grace after its registration.
+                    offline_since: Some(now),
                     ..Runner::default()
                 },
             );
@@ -632,7 +667,10 @@ mod tests {
         fn remove(&self, _: &Scope, id: u64) -> Result<(), String> {
             self.calls.lock().unwrap().push(format!("remove {id}"));
             if *self.refuse_remove.lock().unwrap() {
-                return Err("GitHub answered 422".into());
+                return Err(format!(
+                    "GitHub answered 422 to DELETE orgs/acme/actions/runners/{id}: Bad request - \
+                     Runner lehrnas-test is currently running a job and cannot be deleted."
+                ));
             }
             *self.seen.lock().unwrap() = Some(RunnerSeen::Gone);
             self.by_id.lock().unwrap().insert(id, RunnerSeen::Gone);
@@ -898,6 +936,140 @@ mod tests {
         assert_eq!(t.e.round(112).0, Step::Wait(Waiting::Drained));
         t.e.shared.change(|s| s.drain = false).unwrap();
         assert_eq!(t.e.round(113).0, Step::Register);
+    }
+
+    fn stops(t: &T) -> usize {
+        t.pod
+            .log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.starts_with("stop"))
+            .count()
+    }
+
+    fn removes(t: &T) -> usize {
+        t.hub
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.starts_with("remove"))
+            .count()
+    }
+
+    fn says(t: &T, seen: RunnerSeen, at: u64) -> Step {
+        *t.hub.seen.lock().unwrap() = Some(seen);
+        t.e.round(at).0
+    }
+
+    #[test]
+    fn a_busy_runner_github_shows_offline_mid_job_keeps_its_job() {
+        // LehrNAS #978, 2026-11-28: registered, online, busy, then GitHub
+        // answered offline 313 s after the registration, mid-job.
+        let t = setup("busyoffline");
+        assert_eq!(t.e.round(100).0, Step::Register);
+        assert_eq!(says(&t, RunnerSeen::Idle, 130), Step::Wait(Waiting::Idle));
+        assert_eq!(
+            says(&t, RunnerSeen::Busy, 240),
+            Step::Wait(Waiting::Running)
+        );
+        for at in [413, 500, 700, 839] {
+            assert_eq!(
+                says(&t, RunnerSeen::Offline, at),
+                Step::Wait(Waiting::Running),
+                "at {at}"
+            );
+        }
+        // GitHub showing it busy again restarts the trust.
+        assert_eq!(
+            says(&t, RunnerSeen::Busy, 840),
+            Step::Wait(Waiting::Running)
+        );
+        for at in [841, 1439] {
+            assert_eq!(
+                says(&t, RunnerSeen::Offline, at),
+                Step::Wait(Waiting::Running),
+                "at {at}"
+            );
+        }
+        assert_eq!(
+            (stops(&t), removes(&t)),
+            (0, 0),
+            "its job was never touched"
+        );
+        // Silent for GitHub's lost-runner time since its last busy answer, and
+        // offline for the grace: dead.
+        assert_eq!(
+            says(&t, RunnerSeen::Offline, 840 + policy::LOST_RUNNER_SECS),
+            Step::Remove
+        );
+        assert_eq!((stops(&t), removes(&t)), (1, 1));
+    }
+
+    #[test]
+    fn an_offline_answer_after_online_starts_the_grace_then() {
+        let t = setup("offlinelater");
+        t.e.round(100);
+        says(&t, RunnerSeen::Idle, 130);
+        // 313 s after its registration: before #978, removed at once.
+        assert_eq!(
+            says(&t, RunnerSeen::Offline, 413),
+            Step::Wait(Waiting::Idle)
+        );
+        let last = 413 + policy::OFFLINE_GRACE_SECS - 1;
+        assert_eq!(
+            says(&t, RunnerSeen::Offline, last),
+            Step::Wait(Waiting::Idle)
+        );
+        // Online again in between: the grace starts over at the next offline.
+        says(&t, RunnerSeen::Idle, last + 1);
+        assert_eq!(
+            says(&t, RunnerSeen::Offline, last + 2),
+            Step::Wait(Waiting::Idle)
+        );
+        assert_eq!(removes(&t), 0);
+        assert_eq!(
+            says(
+                &t,
+                RunnerSeen::Offline,
+                last + 2 + policy::OFFLINE_GRACE_SECS
+            ),
+            Step::Remove
+        );
+    }
+
+    #[test]
+    fn github_refusing_removal_for_a_running_job_keeps_a_later_retry_from_stopping_it() {
+        // LehrNAS #978: a 422 "currently running a job", then a retry that
+        // GitHub would have accepted, and the job was stopped.
+        let t = setup("refusebusy");
+        t.e.round(100);
+        says(&t, RunnerSeen::Idle, 130);
+        says(&t, RunnerSeen::Offline, 500);
+        *t.hub.refuse_remove.lock().unwrap() = true;
+        let at = 500 + policy::OFFLINE_GRACE_SECS;
+        assert_eq!(says(&t, RunnerSeen::Offline, at), Step::Remove);
+        assert!(
+            t.e.shared
+                .lock()
+                .1
+                .fault
+                .as_deref()
+                .unwrap()
+                .contains("running a job"),
+            "the refusal shows"
+        );
+        *t.hub.refuse_remove.lock().unwrap() = false;
+        for later in [at + 5, at + 35, at + policy::LOST_RUNNER_SECS - 1] {
+            assert_eq!(
+                says(&t, RunnerSeen::Offline, later),
+                Step::Wait(Waiting::Running),
+                "at {later}"
+            );
+        }
+        assert_eq!((stops(&t), removes(&t)), (0, 1), "no retry, no stop");
+        assert_eq!(registers(&t), 1);
     }
 
     #[test]
