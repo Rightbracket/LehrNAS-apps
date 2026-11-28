@@ -337,7 +337,7 @@ impl Engine {
             seen.get(&n)
                 .copied()
                 .flatten()
-                .is_some_and(|c| policy::holds_a_job(&c))
+                .is_some_and(|c| policy::may_hold_a_job(&c))
         };
         let mut no_word = None;
         let mut steps = BTreeMap::new();
@@ -465,12 +465,15 @@ impl Engine {
                     // GitHub says it's running a job: that's its word that the
                     // runner is busy, so no later round's offline stops it
                     // (LehrNAS #978). The refusal still shows as a fault.
+                    // Saved, as the first busy answer is, so the hold outlasts a
+                    // restart.
                     if policy::refused_for_its_job(&e) {
-                        let mut g = self.shared.lock();
-                        if let Some(c) = g.0.runners.get_mut(&n) {
-                            c.busy_last = Some(now);
-                            c.offline_since = None;
-                        }
+                        self.shared.change(|s| {
+                            if let Some(c) = s.runners.get_mut(&n) {
+                                c.busy_last = Some(now);
+                                c.offline_since = None;
+                            }
+                        })?;
                     }
                     return Err(e);
                 }
@@ -1085,6 +1088,10 @@ mod tests {
         }
         assert_eq!((stops(&t), removes(&t)), (0, 1), "no retry, no stop");
         assert_eq!(registers(&t), 1);
+        // The 422's hold is saved, so a restarted broker holds it too.
+        let saved = t.e.shared.file.load().unwrap();
+        assert_eq!(saved.runners[&1].busy_last, Some(at));
+        assert_eq!(saved.runners[&1].offline_since, None);
     }
 
     #[test]
@@ -1417,6 +1424,35 @@ mod tests {
         let log = t.pod.log.lock().unwrap().clone();
         assert!(!log.iter().any(|l| l == "clean"), "{log:?}");
         assert!(log.iter().any(|l| l == "write 2"), "{log:?}");
+    }
+
+    #[test]
+    fn a_neighbour_github_refuses_to_remove_keeps_the_ipc_that_round() {
+        // CodeCritic on #984: 1's removal is refused for its job (a 422) in
+        // the same round that 2 is forgotten. 2's forget must not clean.
+        let t = two("refuseipc");
+        t.e.steps(100);
+        let (a, b) = (id_of(&t, 1), id_of(&t, 2));
+        set(&t, a, RunnerSeen::Idle);
+        set(&t, b, RunnerSeen::Idle);
+        t.e.steps(130);
+        set(&t, a, RunnerSeen::Offline);
+        t.e.steps(500);
+        *t.hub.refuse_remove.lock().unwrap() = true;
+        set(&t, b, RunnerSeen::Gone);
+        t.pod.log.lock().unwrap().clear();
+        let at = 500 + policy::OFFLINE_GRACE_SECS;
+        let (steps, _) = t.e.steps(at);
+        assert_eq!(steps[&1], Step::Remove);
+        assert_eq!(steps[&2], Step::Forget);
+        let log = t.pod.log.lock().unwrap().clone();
+        assert!(!log.iter().any(|l| l == "clean"), "{log:?}");
+        // The next round holds 1 for its job, and 2 registers without a clean.
+        let (steps, _) = t.e.steps(at + 5);
+        assert_eq!(steps[&1], Step::Wait(Waiting::Running));
+        assert_eq!(steps[&2], Step::Register);
+        let log = t.pod.log.lock().unwrap().clone();
+        assert!(!log.iter().any(|l| l == "clean"), "{log:?}");
     }
 
     #[test]

@@ -341,7 +341,8 @@ pub fn decide(r: &Round) -> Step {
 
 /// The runner's job is taken to be running: GitHub shows it busy, or shows
 /// it offline within `LOST_RUNNER_SECS` of its last busy answer (LehrNAS
-/// #978). Removal and a neighbour's IPC clean (§17.4) both go by this.
+/// #978). Removal goes by this; a neighbour's IPC clean by the wider
+/// [`may_hold_a_job`].
 #[must_use]
 pub fn holds_a_job(c: &Current) -> bool {
     match c.seen {
@@ -349,6 +350,15 @@ pub fn holds_a_job(c: &Current) -> bool {
         Some(RunnerSeen::Offline) => c.since_busy_secs.is_some_and(|s| s < LOST_RUNNER_SECS),
         _ => false,
     }
+}
+
+/// For a neighbour's IPC clean (§17.4): the runner may have a job running.
+/// Wider than [`holds_a_job`]: GitHub showing it offline doesn't say it has
+/// none (LehrNAS #978), so the clean waits until GitHub shows it idle or gone.
+/// A clean put off only leaves the IPC as a busy box already does.
+#[must_use]
+pub fn may_hold_a_job(c: &Current) -> bool {
+    holds_a_job(c) || c.seen == Some(RunnerSeen::Offline)
 }
 
 /// What this round says about §13.2's silent runner: `Some(true)` when GitHub
@@ -839,6 +849,23 @@ mod tests {
         r.drain = false;
         r.current.as_mut().unwrap().since_busy_secs = Some(LOST_RUNNER_SECS);
         assert_eq!(decide(&r), Step::Remove);
+    }
+
+    #[test]
+    fn a_held_runner_asked_to_leave_goes_when_the_hold_ends() {
+        // Drain on, last busy 600 s ago, offline for only 60 s: no grace to
+        // wait out once the hold ends.
+        let mut r = with(RunnerSeen::Offline);
+        r.drain = true;
+        let c = r.current.as_mut().unwrap();
+        c.offline_secs = 60;
+        c.since_busy_secs = Some(LOST_RUNNER_SECS - 1);
+        assert_eq!(decide(&r), Step::Wait(Waiting::Running));
+        r.current.as_mut().unwrap().since_busy_secs = Some(LOST_RUNNER_SECS);
+        assert_eq!(decide(&r), Step::Remove);
+        // Not asked to leave, the same runner waits for its offline grace.
+        r.drain = false;
+        assert_eq!(decide(&r), Step::Wait(Waiting::Idle));
     }
 
     #[test]
